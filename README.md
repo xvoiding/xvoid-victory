@@ -1,15 +1,30 @@
-# VIctory on an RX 7900 XTX
+# xvoid-victory
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
-one PC, without giving up the picture. It is not there yet.
+A fork of [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX),
+itself a fork of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
+layer that runs an Xbox Series title natively on Windows from files the user
+supplies. It is made by xvoid with [Claude Code](https://claude.com/claude-code).
+
+The 7900 XTX fork was tuned for **AMD RDNA 3 with 24 GB of video memory and 64 GB
+of RAM**. This one is about getting the same layer to start and stay stable on
+**NVIDIA laptops with 8 GB of video memory and 32 GB of RAM** (the target is an
+RTX 4060 Laptop with an Intel i7), where the memory the title needs is the
+first wall. It is not there yet.
+
+## Status of this fork
+
+Nothing has been measured on the target hardware yet. A first attempt on it, with
+launcher folders made separately from this fork, stayed under 5 fps; the suspected cause is memory
+(40-46 GB private against 32 GB of RAM, so Windows pages), not confirmed.
+What this fork adds so far is ways to ask for less memory, and notes on what to
+check: [docs/low-memory.md](docs/low-memory.md). The speed work underneath is the
+7900 XTX fork's, and its numbers below are its numbers, not this fork's.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-25)
+## Where the 7900 XTX fork stood (2026-11-25, inherited, not measured here)
 
 Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
 RX 7900 XTX, 1440p, the Series X profile.
@@ -43,8 +58,8 @@ model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
 tools, and your own dump of the title.
 
 ```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
+git clone https://github.com/xvoiding/xvoid-victory
+cd xvoid-victory
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path of your copy's executable>
@@ -52,6 +67,10 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+
+On 8 GB of video memory and 32 GB of RAM, start with `-LowMemory` (the Series S
+console model and a texture budget of 3072 MB; `-Console` and `-TextureBudgetMB`
+set them one by one) and read [docs/low-memory.md](docs/low-memory.md) first.
 
 Before the first run, ahead of time (both can be stopped and go on later):
 
@@ -94,6 +113,8 @@ commits taken from elsewhere name the commit and its author.
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
   contributors: the loader, the runtime services, the Direct3D 12 back end and
   the shader recompiler.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**:
+  the fork this one started from, and all of its speed work (the history is kept).
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
   this one started from, and the people whose pull requests it carries.
 - **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
