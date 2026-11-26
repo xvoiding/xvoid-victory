@@ -1,6 +1,6 @@
 name: release
 
-# Tag a version (v0.1.0) to publish the engine build and the launcher together. The launcher downloads the engine
+# Tag a version (v0.1.0), or publish a release for a new tag on the Releases page, to build and attach the engine and the launcher. The launcher downloads the engine
 # asset and refuses it unless its .sha256 file is published beside it, so both files must stay in the release.
 on:
   push:
@@ -64,12 +64,20 @@ jobs:
         with:
           path: assets
           merge-multiple: true
-      - name: Create the release
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release create "${{ github.ref_name }}" assets/* \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
-            --prerelease \
-            --notes "Engine build and launcher. Needs your own copy of the game's files; none are included. Experimental."
+          # If the release was made first (on the Releases page, say), the files are added to it.
+          # Otherwise the release is created here.
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber --repo "$REPO"
+          else
+            gh release create "$TAG" assets/* \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --prerelease \
+              --notes "Engine build and launcher. Needs your own copy of the game's files; none are included. Experimental."
+          fi

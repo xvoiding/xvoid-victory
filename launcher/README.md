@@ -49,8 +49,9 @@ the shader and pipeline cache, logs, reports).
 
 ## Releasing
 
-Pushing a tag (`v0.1.0`) runs `.github/workflows/release.yml`: it builds the engine (`diag` profile with diagnostics, the
-build every measurement here is of) and the launcher, runs the tests, and publishes a pre-release with
+Pushing a tag (`v0.1.0`), or publishing a release for a new tag on the Releases page, runs `.github/workflows/release.yml`:
+it builds the engine (`diag` profile with diagnostics, the build every measurement here is of) and the launcher, runs the
+tests, and attaches these to the release (creating a pre-release if there is none yet):
 
 - `victory-engine-win-x64.zip` and `victory-engine-win-x64.zip.sha256` (the launcher refuses an engine with no checksum),
 - `xvoid-launcher.exe` and `xvoid-launcher.exe.sha256`.
