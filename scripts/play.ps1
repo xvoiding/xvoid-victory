@@ -10,6 +10,11 @@
 # -LowMemory    for 8 GB cards and 32 GB of RAM: Series S, and a texture budget of 3072 MB unless
 #               -TextureBudgetMB says another. A starting point to tune, not a measured setting
 #               (docs/low-memory.md).
+# -Ambient     the fork's stand-in for the title's ray-traced indirect light (VICTORY_AMBIENT=0.8). OFF by default here:
+#              on an RTX 4060 Laptop it blew the picture out to a white blob (2026-11-25, see docs/low-memory.md).
+# -ThinThreads threads that translate list calls (VICTORY_THIN_THREADS). Default 4 here (the 7900 XTX fork's is 8,
+#              which took all of a laptop i7).
+# -NoBook      do not write down the pipelines the run makes (scripts\prep.ps1 -Warm builds them ahead)
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
     [Parameter(Mandatory)][string]$Exe,
@@ -19,6 +24,9 @@ param(
     [ValidateSet('SeriesX', 'SeriesS')][string]$Console = 'SeriesX',
     [int]$TextureBudgetMB = 0,
     [switch]$LowMemory,
+    [switch]$Ambient,
+    [switch]$NoBook,
+    [int]$ThinThreads = 4,
     [hashtable]$More = @{}
 )
 if ($LowMemory) {
@@ -29,13 +37,15 @@ $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
     VICTORY_INDIRECT_BATCH = '2'; VICTORY_MAP_THREADS = '1'; VICTORY_TITLE_PRIORITIES = '0'; VICTORY_CARD_AWAKE = '1'
-    VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
+    VICTORY_SHOW_AFTER = '1'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
 }
 if ($Safe) {
     $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
 } else {
-    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    $settings.VICTORY_THIN = '1'; $settings.VICTORY_THIN_THREADS = [string]$ThinThreads; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
+if ($Ambient) { $settings.VICTORY_AMBIENT = '0.8' }
+if (-not $NoBook) { $settings.VICTORY_PIPELINE_BOOK = '1' }   # kept for prep.ps1 -Warm
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 if ($TextureBudgetMB -gt 0) { $settings.VICTORY_TEXTURE_BUDGET_MB = [string]$TextureBudgetMB }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }

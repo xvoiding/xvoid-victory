@@ -850,6 +850,31 @@ pub(crate) fn presented() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
+/// Bytes between present plane descriptions: the title's are larger than
+/// [`Plane`] (seen in a run, token and resource list of plane 1 72 bytes after
+/// plane 0's).
+#[cfg(windows)]
+const PLANE_STRIDE: usize = 72;
+
+/// The title presents two planes: the scene (plane 0) and the user interface
+/// over it (plane 1, with alpha), which the console blends at scan-out. The
+/// resource of plane 1, if there are two planes and they are to be blended
+/// (`VICTORY_COMPOSE=0`: the first plane alone, as upstream shows it).
+#[cfg(windows)]
+fn interface_plane(planes: u32, plane_parameters: *const Plane, first: This, token: u64) -> Option<This> {
+    if planes < 2 || std::env::var("VICTORY_COMPOSE").is_ok_and(|v| v == "0") {
+        return None;
+    }
+    // SAFETY: the title passes `planes` plane descriptions.
+    let second = unsafe { plane_parameters.byte_add(PLANE_STRIDE).as_ref() }?;
+    if second.count == 0 || second.resources.is_null() || second.token != token {
+        return None;
+    }
+    // SAFETY: the plane lists `count` resources.
+    let resource = unsafe { *second.resources };
+    (resource != first).then_some(resource)
+}
+
 /// Shows the first plane's first resource in our window.
 ///
 /// shortcut: one plane, no scaling or placement, the source expected in
@@ -934,22 +959,37 @@ extern "system" fn present(
             && !plane.resources.is_null()
         {
             // SAFETY: the plane lists `count` resources.
-            let resource = unsafe { *plane.resources };
+            let first = unsafe { *plane.resources };
             // The state the lists recorded so far leave it in (the next
             // frame's, recorded before this is shown, go on from there).
-            crate::resource::host_copy(resource).map(|copy| {
-                let state = crate::resource::host_transition(resource, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before);
-                crate::resource::host_transition(resource, state);
-                // (Lists not translated yet leave it in no state yet: the
-                // one it is in when its turn in the line comes.)
-                let state = if crate::list::thin::wanted() { u32::MAX } else { state };
-                (resource as usize, copy, state)
-            })
+            let take = |resource: This| {
+                crate::resource::host_copy(resource).map(|copy| {
+                    let state = crate::resource::host_transition(resource, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before);
+                    crate::resource::host_transition(resource, state);
+                    // (Lists not translated yet leave it in no state yet: the
+                    // one it is in when its turn in the line comes.)
+                    let state = if crate::list::thin::wanted() { u32::MAX } else { state };
+                    (resource as usize, copy, state)
+                })
+            };
+            // With two planes the interface is shown over the scene.
+            match interface_plane(planes, plane_parameters, first, plane.token).and_then(|second| {
+                let ui = take(second)?;
+                let scene = take(first);
+                Some((ui, scene))
+            }) {
+                Some((ui, scene)) => Some((ui, scene.map(|(_, copy, state)| (copy, state)))),
+                None => take(first).map(|t| (t, None)),
+            }
         } else {
             None
         };
-        let resource = texture.as_ref().map_or(0, |t| t.0);
-        behind::present(this, texture.map(|(_, copy, state)| (copy, state)), Shown { frame, resource });
+        let resource = texture.as_ref().map_or(0, |t| (t.0).0);
+        behind::present(
+            this,
+            texture.map(|((_, copy, state), scene)| (copy, state, scene)),
+            Shown { frame, resource },
+        );
         called.end();
         #[cfg(feature = "diagnostics")]
         frame_ends();
@@ -967,9 +1007,23 @@ extern "system" fn present(
         && let Some(host) = crate::host::host()
     {
         const COPY_SOURCE: u32 = 0x800;
+        // With two planes the interface is shown over the scene.
+        let (resource, texture, under) = match interface_plane(planes, plane_parameters, resource, plane.token)
+            .and_then(|r| crate::resource::host_resource(r).map(|t| (r, t)))
+        {
+            Some((r, t)) => (r, t, Some((resource, texture))),
+            None => (resource, texture, None),
+        };
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
-        show(texture, state, Shown { frame, resource: resource as usize });
+        let under_state = under.map(|(r, _)| {
+            crate::resource::host_transition(r, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before)
+        });
+        let scene = under.map(|(_, t)| t).zip(under_state);
+        show(texture, state, scene, Shown { frame, resource: resource as usize });
+        if let (Some((r, _)), Some(st)) = (under, under_state) {
+            crate::resource::host_transition(r, st);
+        }
         crate::resource::host_transition(resource, state);
         let _ = host;
     }
@@ -1003,11 +1057,16 @@ struct Shown {
 
 /// Shows `texture`, in host state `state`, in our window.
 #[cfg(windows)]
-fn show(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource, state: u32, what: Shown) {
+fn show(
+    texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    state: u32,
+    scene: Option<(&windows::Win32::Graphics::Direct3D12::ID3D12Resource, u32)>,
+    what: Shown,
+) {
     let Some(host) = crate::host::host() else {
         return;
     };
-    let shown = host.present(texture, state, what.frame);
+    let shown = host.present(texture, state, what.frame, scene);
     #[cfg(feature = "diagnostics")]
     blinks(what.frame, what.resource as This, state, shown);
     #[cfg(not(feature = "diagnostics"))]

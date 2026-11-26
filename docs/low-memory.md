@@ -2,7 +2,7 @@
 
 Target: an NVIDIA RTX 4060 Laptop, an Intel i7, 32 GB of RAM, Windows 11.
 
-**Nothing on this page has been measured on that machine.** It is what the code
+**Most of this page has not been measured on that machine** (the last table has the first numbers). It is what the code
 and the 7900 XTX fork's notes ([findings.md](findings.md)) say, turned into things
 to check and to try. Where a line is a guess it says so. The aim is steady frame
 times first (no paging, no pipeline stalls, the right GPU), a higher number
@@ -26,7 +26,7 @@ card's memory into the PC's, which ended runs 20 and 24").
 
 ## The order to do it in
 
-1. **A big page file.** 48-64 GB, on the fastest drive, so that running over RAM
+1. **A big page file.** 48-64 GB (`scripts\set-pagefile.ps1`; AtlasOS ships with none, and a run without one died at ~24 GB private), on the fastest drive, so that running over RAM
    is slow and not a crash. The title also needs several GiB of free Windows
    commit at startup ([README-fxceless.md](README-fxceless.md)). Close browsers and
    launchers first.
@@ -55,7 +55,7 @@ card's memory into the PC's, which ended runs 20 and 24").
    its cache where it did.
 6. **Put the cache on the fast drive**: `cache_dir` in `victory.toml`
    (`victory.example.toml`), outside the repository.
-7. **The Series S console model**: `scripts\play.ps1 -Console SeriesS`, which runs
+7. **The Series S console model** (reported to render black on this card on an earlier build of the layer; not retried here): `scripts\play.ps1 -Console SeriesS`, which runs
    `victory run <exe> --execute --console series-s`. The title is told it has
    7,776 MiB, not 10 GiB + 3.5 GiB (`crates/victory-gpu/src/console.rs`).
    The 7900 XTX fork measured this as "not worth it", but on a card and a PC with
@@ -117,12 +117,19 @@ experiment of the 7900 XTX fork, not a recommendation.
 | Scene | ms a frame (median) | Longest frames | Settings | Date |
 |---|---|---|---|---|
 | Menus | | | | |
+| Indoors, a room with a window (blurry picture) | 172-257 (4-6 fps); 3,700-4,600 draws | not recorded | Series X, `play.ps1` defaults with ambient off, 64 GB paging file, 4 list threads | 2026-11-25 |
+| Same, before pipelines were made ahead | ~1,650-1,800 (0.6 fps) | | Series X, ambient 0.8 (white picture), 8 list threads | 2026-11-25 |
 | Prologue, indoors | | | | |
 | Outdoors on foot | | | | |
 
+Measured on: RTX 4060 Laptop 8 GB, Intel i7, 32 GB, Windows 11 (AtlasOS). One person, screenshots and logs; the GPU
+reads about 98 % and the CPU 100 % in the HUD, so neither side is idle. Not a benchmark.
+
 ## Not known
 
-- Whether any of the AMD-specific fixes in the fork behave differently on NVIDIA.
+- Whether any of the AMD-specific fixes in the fork behave differently on NVIDIA. One does: the ambient stand-in
+  (`VICTORY_AMBIENT`) blew the picture out to white, so `play.ps1` leaves it off. Compute pipelines whose shaders keep a
+  64-lane wave size are refused on a 32-lane card (see README.md, Status).
   The 7900 XTX fork says it was tested on one machine only, and on NVIDIA nobody
   has reported.
 - Whether 8 GB of video memory is enough at all for the Series X profile; the

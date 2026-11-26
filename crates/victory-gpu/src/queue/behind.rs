@@ -392,7 +392,8 @@ enum Job {
     /// A signal of the queue's.
     Signal(usize, u64),
     /// A frame is shown: the texture and the state its lists leave it in.
-    Present(Option<(std::sync::Arc<crate::resource::HostTexture>, u32)>, super::Shown),
+    /// The texture shown and its state, and under it the scene of a second plane.
+    Present(Option<(std::sync::Arc<crate::resource::HostTexture>, u32, Option<(std::sync::Arc<crate::resource::HostTexture>, u32)>)>, super::Shown),
 }
 
 // SAFETY: D3D12 objects are free-threaded; a job is touched by whoever put it
@@ -570,11 +571,15 @@ impl Work for Job {
                 }
             }
             Job::Present(texture, shown) => {
-                if let Some((texture, state)) = texture {
+                if let Some((texture, state, scene)) = texture {
                     // (Where its lists were not translated when the title
                     // presented: the state they left it in.)
                     let state = if state == u32::MAX { texture.state.load(Relaxed) } else { state };
-                    super::show(&texture.texture, state, shown);
+                    let scene = scene.map(|(t, s)| {
+                        let s = if s == u32::MAX { t.state.load(Relaxed) } else { s };
+                        (t, s)
+                    });
+                    super::show(&texture.texture, state, scene.as_ref().map(|(t, s)| (&t.texture, *s)), shown);
                 }
                 QUEUED.fetch_sub(1, Relaxed);
             }
@@ -811,7 +816,7 @@ pub(super) fn wait(this: This, fence: This, value: u64) {
 
 /// A present on queue `this` of `texture`, in the state the lists recorded so
 /// far leave it in.
-pub(super) fn present(this: This, texture: Option<(std::sync::Arc<crate::resource::HostTexture>, u32)>, shown: super::Shown) {
+pub(super) fn present(this: This, texture: Option<(std::sync::Arc<crate::resource::HostTexture>, u32, Option<(std::sync::Arc<crate::resource::HostTexture>, u32)>)>, shown: super::Shown) {
     QUEUED.fetch_add(1, Relaxed);
     STATS[PRESENTS].fetch_add(1, Relaxed);
     LANE.push(this as usize, [Job::Present(texture, shown)]);

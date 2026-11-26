@@ -14,16 +14,28 @@ is not there yet.
 
 ## Status of this fork
 
-Nothing has been measured on the target hardware yet. A first attempt on it, with
-launcher folders made separately from this fork, stayed under 5 fps; the suspected cause is memory
-(40-46 GB private against 32 GB of RAM, so Windows pages), not confirmed.
-What this fork adds so far is ways to ask for less memory (`-LowMemory`), and an
-ordered checklist for steady frames on this hardware: the page file, which GPU
-Windows gives the title, a driver shader cache that keeps its pipelines,
-pipelines made before playing, and thread counts for fewer cores
-([docs/low-memory.md](docs/low-memory.md)). It also has a table for results, which
-is empty until someone measures. The speed work underneath is the 7900 XTX
-fork's, and its numbers below are its numbers, not this fork's.
+First measurements on the target (RTX 4060 Laptop 8 GB, Intel i7, 32 GB, Windows 11, 2026-11-25; one PC, one
+person's screenshots and logs, Series X profile, the 7900 XTX fork's code with the changes in this tree):
+
+- **About 4-6 fps indoors** (170-260 ms a frame, 3,700-4,600 draws a frame), with the card at about 98 % and the
+  CPU at 100 %. Before the changes below it was 0.6 fps while ~850 pipelines were still being made.
+- **A first run ended** at about 24 GB private memory with "memory allocation of 1048576 bytes failed": the PC had no
+  paging file, so about 30 GB of commit. A 64 GB paging file (`scripts\set-pagefile.ps1`) ended that.
+- **`VICTORY_AMBIENT=0.8` made the picture a white blob** on this card; it is off here unless `-Ambient` is given.
+  Likely cause (not proven): its stand-in reads results of compute programs that this card refuses (next point).
+- **Some compute pipelines are refused** (`The parameter is incorrect`, 0x80070057): the recompiler keeps a 64-lane
+  wave size on shaders it cannot split into two 32-lane halves (an LDS read and write in one lane-branch region,
+  lane masks used as data), and NVIDIA's waves are 32. About 340 draws a frame are dropped for it. This, not memory,
+  is why lighting and effects are missing. `-LowMemory` (Series S) was reported to render black on this card on an
+  earlier build of the layer; not retried in this tree.
+- The picture is **blurry** indoors; whether that is textures still streaming or a pass that is not running is not
+  known yet.
+
+What this fork adds: the two-plane (scene and interface) blend so the HUD and menus show; `shaders` translating for
+the host's wave size and view limit, so `scripts\prep.ps1` fills a cache the run can use; NVIDIA-safe defaults
+(`play.ps1`: ambient off, 4 list threads); ways to ask for less memory (`-LowMemory`); a paging-file script; and an
+ordered checklist for steady frames on this hardware ([docs/low-memory.md](docs/low-memory.md)). The speed work
+underneath is the 7900 XTX fork's, and its numbers below are its numbers, not this fork's.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
@@ -77,11 +89,14 @@ On 8 GB of video memory and 32 GB of RAM, start with `-LowMemory` (the Series S
 console model and a texture budget of 3072 MB; `-Console` and `-TextureBudgetMB`
 set them one by one) and read [docs/low-memory.md](docs/low-memory.md) first.
 
-Before the first run, ahead of time (both can be stopped and go on later):
+Before the first run, ahead of time (both can be stopped and go on later; the script sets the host numbers the cache
+is keyed by, which a bare `victory shaders` did not before this fork):
 
 ```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+scripts\set-pagefile.ps1 -SizeGB 64                  # once, as admin, then restart Windows
+scripts\prep.ps1 -Exe <your exe>                     # every shader translated, minutes
+scripts\play.ps1 -Exe <your exe>                     # one run, writes down the pipelines it makes; close it
+scripts\prep.ps1 -Exe <your exe> -Warm               # those pipelines made ahead, for a new driver or build
 ```
 
 Commands, debugging switches and upstream's own description:

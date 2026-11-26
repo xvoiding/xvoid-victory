@@ -167,6 +167,23 @@ enum Console {
     SeriesS,
 }
 
+/// Tells the translator what the host the translations are for looks like, as the log of a run on it says
+/// (`host wave lanes min=.. max=..`, `host view heaps hold .. views`): `VICTORY_HOST_WAVE=32`,
+/// `VICTORY_VIEW_LIMIT=<null slot>`, `VICTORY_HOST_RDNA=1` for AMD RDNA.
+fn host_from_env() {
+    // `VICTORY_VIEW_LIMIT=<null slot>`: translate as on a host whose view heap is capped
+    if let Some(n) = std::env::var("VICTORY_VIEW_LIMIT").ok().and_then(|v| v.parse().ok()) {
+        victory_shader::emit::set_view_heap_limit(n);
+    }
+    // `VICTORY_HOST_WAVE=32`: translate as for a GPU whose waves are at most 32 lanes
+    if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
+        victory_shader::emit::set_host_max_wave(n);
+    }
+    if std::env::var_os("VICTORY_HOST_RDNA").is_some_and(|v| v == "1") {
+        victory_shader::emit::set_host_rdna(true);
+    }
+}
+
 fn main() -> Result<()> {
     victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
@@ -200,20 +217,18 @@ fn main() -> Result<()> {
             jobs,
             warm,
         } => {
-            // `VICTORY_VIEW_LIMIT=<null slot>`: translate as on a host whose view heap is capped
-            if let Some(n) = std::env::var("VICTORY_VIEW_LIMIT").ok().and_then(|v| v.parse().ok()) {
-                victory_shader::emit::set_view_heap_limit(n);
-            }
-            // `VICTORY_HOST_WAVE=32`: translate as for a GPU whose waves are at most 32 lanes
-            if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
-                victory_shader::emit::set_host_max_wave(n);
-            }
+            host_from_env();
             if let Some(file) = warm {
                 return translate::warm(paths, &file, jobs);
             }
             translate::run(paths, validate, pipelines, list, jobs)
         }
-        Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        Command::Shaders { paths, jobs } => {
+            // The cache is keyed by what the translator was told of the host: without these a precompile
+            // fills the cache with translations no run on a 32-lane card (NVIDIA) will ever be served.
+            host_from_env();
+            translate::precompile(paths, jobs)
+        }
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {
