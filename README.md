@@ -17,10 +17,11 @@ is not there yet.
 Nothing has been measured on the target hardware yet. A first attempt on it, with
 launcher folders made separately from this fork, stayed under 5 fps; the suspected cause is memory
 (40-46 GB private against 32 GB of RAM, so Windows pages), not confirmed.
-What this fork adds so far is ways to ask for less memory (`-LowMemory`), and an
-ordered checklist for steady frames on this hardware: the page file, which GPU
-Windows gives the title, a driver shader cache that keeps its pipelines,
-pipelines made before playing, and thread counts for fewer cores
+What this fork adds so far is ways to ask for less memory (`-LowMemory`), a start
+on the high-performance GPU where a laptop has two (`VICTORY_GPU=default`: on
+Windows' default one), and an ordered checklist for steady frames on this
+hardware: the page file, which GPU is used, a driver shader cache that keeps its
+pipelines, pipelines made before playing, and thread counts for fewer cores
 ([docs/low-memory.md](docs/low-memory.md)). It also has a table for results, which
 is empty until someone measures. The speed work underneath is the 7900 XTX
 fork's, and its numbers below are its numbers, not this fork's.
