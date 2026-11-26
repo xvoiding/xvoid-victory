@@ -274,6 +274,8 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
             tally(11, started.elapsed().as_nanos() as u64);
         }
         if failed {
+            // (On the timeline: how many askings the kernel refuses.)
+            crate::timeline::span("asking refused").end();
             return None;
         }
         #[cfg(feature = "diagnostics")]
@@ -313,6 +315,11 @@ const AHEAD_MAX: usize = (1 << 30) / PAGE;
 /// 456 ms, in run 14). Ranges that are not write-watched, or lie alone, are
 /// left to `writes`.
 pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
+    ask_ahead_held(ranges, false);
+}
+
+/// [`ask_ahead`]; `held`: the caller holds everything ([`Asking::hold_all`]).
+fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
     let mut pieces: Vec<(usize, usize)> = ranges
         .iter()
         // Not view memory known by its bits: the kernel would refuse the
@@ -329,7 +336,7 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
     if journal().kept {
         return;
     }
-    let _all = Asking::hold_all();
+    let _all = (!held).then(Asking::hold_all);
     let (mut asked, mut written) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < pieces.len() {
@@ -531,15 +538,22 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     if !once() {
         return;
     }
+    let mut spent = crate::timeline::span("asking: ahead");
     ask_once_end();
-    ask_ahead(ranges);
-    ask_rest(ranges);
+    // Both parts under one hold of everything: a second hold waited for the
+    // other threads' askings again (0.5 ms a time, run fills-ab3), and no
+    // other asking comes between the two parts.
+    let _all = Asking::hold_all();
+    ask_ahead_held(ranges, true);
+    spent.next("asking: the rest");
+    ask_rest(ranges, true);
+    spent.end();
 }
 
 /// [`ask_once`] after its [`ask_ahead`]: what that left to `writes`, and the
 /// asking stands.
-fn ask_rest(ranges: &[(usize, usize)]) {
-    let _all = Asking::hold_all();
+fn ask_rest(ranges: &[(usize, usize)], held: bool) {
+    let _all = (!held).then(Asking::hold_all);
     let mut ahead = {
         let mut j = journal_mut();
         std::mem::take(&mut j.ahead)
@@ -3084,7 +3098,7 @@ mod tests {
         let (copied, _) = writes(p, p + 4 * PAGE, false).expect("watched");
         // SAFETY: committed pages of ours.
         unsafe { ((p + PAGE) as *mut u8).write_volatile(1) };
-        ask_rest(&ranges);
+        ask_rest(&ranges, false);
         let last = journal().written.get(&(p / PAGE + 1)).copied();
         ask_once_end();
         assert!(last.is_some_and(|last| last > copied), "{last:?} is not after {copied}");
