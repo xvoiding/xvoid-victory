@@ -34,6 +34,11 @@ by the project owner's decision (2026-11-23), entered as an exception in
 repository's licence does not cover them. Nothing else of this kind is
 accepted.
 
+The launcher's own icon, `launcher/src/Xvoid.Launcher/Assets/xvoid.ico`
+(about 30 KB), is the other entry in that list. It is artwork we drew, with
+`launcher/tools/make_icon.py`, and an exe icon has to be a binary `.ico`.
+Nothing in it comes from the game.
+
 ## Where data lives
 
 Outside the repository, configured in `victory.toml`: `game_dir` (the

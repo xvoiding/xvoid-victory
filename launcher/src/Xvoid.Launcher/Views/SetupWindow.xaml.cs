@@ -13,4 +13,6 @@ public partial class SetupWindow : Window
         vm.Finished += Close;
         // Leaving early is allowed; the launcher then opens Settings so nothing is stuck.
     }
+
+    void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

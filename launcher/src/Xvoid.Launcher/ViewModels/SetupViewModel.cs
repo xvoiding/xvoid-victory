@@ -17,6 +17,7 @@ public sealed class SetupViewModel : ObservableObject
         Engine = engine;
         NextCommand = new RelayCommand(Next, () => CanContinue);
         BackCommand = new RelayCommand(() => Step--, () => Step > 0);
+        app.EngineChanged += Refresh;
         settings.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(SettingsViewModel.GamePath) or nameof(SettingsViewModel.GameProblem)) Refresh();
@@ -37,6 +38,7 @@ public sealed class SetupViewModel : ObservableObject
             if (!Set(ref _step, Math.Clamp(value, 0, Steps - 1))) return;
             Refresh();
             if (_step == 2) Settings.RecheckCommand.Execute(null);
+            if (_step == 3 && _app.EnginePath is null) Engine.CheckCommand.Execute(null);
         }
     }
 

@@ -18,6 +18,8 @@ const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
     // The launcher (launcher/): C# and WPF source and project files, all text we write.
     "cs", "csproj", "xaml", "props", "sln", "manifest",
+    // ...and the script that draws the launcher's icon.
+    "py",
 ];
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
@@ -31,10 +33,16 @@ const ALLOWED_NAMES: &[&str] = &[
 ];
 
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
-const EXCEPTIONS: &[(&str, &str)] = &[(
-    "crates/victory-formats/src/bcpack-tables.bin",
-    "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
-)];
+const EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "crates/victory-formats/src/bcpack-tables.bin",
+        "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
+    ),
+    (
+        "launcher/src/Xvoid.Launcher/Assets/xvoid.ico",
+        "the launcher's own icon (about 30 KB), drawn by launcher/tools/make_icon.py; an exe icon has to be a binary .ico (docs/asset-policy.md)",
+    ),
+];
 
 /// Signatures of formats that must never be committed.
 const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[

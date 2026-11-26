@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:views="clr-namespace:Xvoid.Launcher.Views"
-        Title="xvoid Launcher" Width="1040" Height="680" MinWidth="900" MinHeight="600"
+        Title="xvoid Launcher" Icon="Assets/xvoid.ico" Width="1040" Height="680" MinWidth="900" MinHeight="600"
         WindowStartupLocation="CenterScreen" Background="{StaticResource Bg}"
         FontFamily="{StaticResource UiFont}" FontSize="14" Foreground="{StaticResource Text}"
         Closing="Window_Closing">
@@ -24,9 +24,22 @@
         <Border Grid.Column="0" Background="#99000000" BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
             <DockPanel Margin="14,16,14,16">
                 <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="6,2,0,22">
-                    <Border Width="30" Height="30" CornerRadius="8" Background="{StaticResource AccentGradient}">
-                        <Path Data="M9,9 L21,21 M21,9 L9,21" Stroke="White" StrokeThickness="2.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                              Width="12" Height="12" Stretch="Uniform" />
+                    <!-- The same drawing as the exe icon (launcher/tools/make_icon.py): a gradient stroke crossed by a white one. -->
+                    <Border Width="30" Height="30" CornerRadius="8" Background="#0E0E15" BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+                        <Viewbox>
+                            <Canvas Width="100" Height="100">
+                                <Line X1="29" Y1="29" X2="71" Y2="71" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+                                    <Line.Stroke>
+                                        <LinearGradientBrush MappingMode="Absolute" StartPoint="0,0" EndPoint="100,100">
+                                            <GradientStop Color="{StaticResource AccentA}" Offset="0" />
+                                            <GradientStop Color="{StaticResource AccentB}" Offset="1" />
+                                        </LinearGradientBrush>
+                                    </Line.Stroke>
+                                </Line>
+                                <Line X1="71" Y1="29" X2="29" Y2="71" Stroke="#0E0E15" StrokeThickness="23" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                <Line X1="71" Y1="29" X2="29" Y2="71" Stroke="White" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                            </Canvas>
+                        </Viewbox>
                     </Border>
                     <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
                         <TextBlock Text="xvoid" FontWeight="SemiBold" FontSize="15" />
@@ -36,7 +49,7 @@
 
                 <StackPanel DockPanel.Dock="Bottom" Margin="6,0,0,0">
                     <TextBlock Text="ENGINE" Style="{StaticResource Overline}" />
-                    <TextBlock Text="{Binding EngineLabel}" Style="{StaticResource Caption}" Margin="0,2,0,8" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding EngineLabel}" Style="{StaticResource Caption}" Margin="0,2,0,8" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                     <TextBlock Text="{Binding Version, StringFormat=Launcher {0}}" Style="{StaticResource Caption}" Foreground="{StaticResource Faint}" />
                 </StackPanel>
 
