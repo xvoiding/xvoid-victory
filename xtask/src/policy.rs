@@ -40,7 +40,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ),
     (
         "launcher/src/Xvoid.Launcher/Assets/xvoid.ico",
-        "the launcher's own icon (about 30 KB), drawn by launcher/tools/make_icon.py; an exe icon has to be a binary .ico (docs/asset-policy.md)",
+        "the launcher's own icon (about 55 KB), drawn by launcher/tools/make_icon.py; an exe icon has to be a binary .ico (docs/asset-policy.md)",
     ),
 ];
 

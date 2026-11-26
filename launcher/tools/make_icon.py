@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 A = (0xFF, 0x3D, 0x81)  # AccentA in Theme.xaml
 B = (0xFF, 0x9A, 0x3C)  # AccentB
 TILE = (0x0E, 0x0E, 0x15, 255)
-SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+SIZES = [16, 20, 24, 32, 40, 48, 64, 256]
 OUT = Path(__file__).resolve().parents[1] / "src" / "Xvoid.Launcher" / "Assets" / "xvoid.ico"
 
 
@@ -69,9 +69,23 @@ def render(size: int, supersample: int = 8) -> Image.Image:
     return tile.resize((size, size), Image.LANCZOS)
 
 
+def dib(f: Image.Image) -> bytes:
+    """A 32-bit BGRA bitmap in the form an .ico entry wants: bottom-up rows, then an (unused) AND mask."""
+    w, h = f.size
+    raw = f.convert("RGBA").tobytes("raw", "BGRA")
+    rows = [raw[i * w * 4:(i + 1) * w * 4] for i in range(h)]
+    pixels = b"".join(reversed(rows))
+    mask = bytes(((w + 31) // 32) * 4 * h)
+    header = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, len(pixels) + len(mask), 0, 0, 0, 0)
+    return header + pixels + mask
+
+
 def write_ico(frames: list[Image.Image], path: Path) -> None:
     pngs = []
     for f in frames:
+        if f.width < 256:
+            pngs.append(dib(f))
+            continue
         buf = io.BytesIO()
         f.save(buf, format="PNG", optimize=True)
         pngs.append(buf.getvalue())

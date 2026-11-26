@@ -35,7 +35,7 @@ repository's licence does not cover them. Nothing else of this kind is
 accepted.
 
 The launcher's own icon, `launcher/src/Xvoid.Launcher/Assets/xvoid.ico`
-(about 30 KB), is the other entry in that list. It is artwork we drew, with
+(about 55 KB), is the other entry in that list. It is artwork we drew, with
 `launcher/tools/make_icon.py`, and an exe icon has to be a binary `.ico`.
 Nothing in it comes from the game.
 

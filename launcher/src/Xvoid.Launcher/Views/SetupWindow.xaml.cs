@@ -8,6 +8,7 @@ public partial class SetupWindow : Window
     public SetupWindow(SetupViewModel vm)
     {
         InitializeComponent();
+        Icon = App.LoadWindowIcon();
         DataContext = vm;
         vm.Step = 0;
         vm.Finished += Close;

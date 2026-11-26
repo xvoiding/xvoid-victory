@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Xvoid.Launcher.Core;
 
@@ -35,6 +37,23 @@ public partial class App : Application
         catch (Exception ex)
         {
             Die(ex);
+        }
+    }
+
+    /// <summary>The window icon. A problem with it should cost the icon, not the launcher.</summary>
+    internal static ImageSource? LoadWindowIcon()
+    {
+        try
+        {
+            var icon = BitmapFrame.Create(new Uri("pack://application:,,,/Assets/xvoid.ico", UriKind.Absolute),
+                BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            icon.Freeze();
+            return icon;
+        }
+        catch (Exception e)
+        {
+            WriteCrashLog(e);
+            return null;
         }
     }
 
@@ -154,7 +173,10 @@ public partial class App : Application
     {
         var log = WriteCrashLog(ex);
         var where = log is null ? "" : $"\n\nDetails: {log}";
-        MessageBox.Show($"{ex.GetType().Name}: {ex.Message}{where}", Branding.AppName, MessageBoxButton.OK, MessageBoxImage.Error);
+        // WPF wraps most start-up failures in an XamlParseException whose message says nothing; the cause is underneath.
+        var root = ex.GetBaseException();
+        var cause = ReferenceEquals(root, ex) ? "" : $"\n\nCause: {root.GetType().Name}: {root.Message}";
+        MessageBox.Show($"{ex.GetType().Name}: {ex.Message}{cause}{where}", Branding.AppName, MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     static string? WriteCrashLog(Exception? ex)

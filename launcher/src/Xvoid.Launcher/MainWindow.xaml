@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:views="clr-namespace:Xvoid.Launcher.Views"
-        Title="xvoid Launcher" Icon="Assets/xvoid.ico" Width="1040" Height="680" MinWidth="900" MinHeight="600"
+        Title="xvoid Launcher" Width="1040" Height="680" MinWidth="900" MinHeight="600"
         WindowStartupLocation="CenterScreen" Background="{StaticResource Bg}"
         FontFamily="{StaticResource UiFont}" FontSize="14" Foreground="{StaticResource Text}"
         Closing="Window_Closing">

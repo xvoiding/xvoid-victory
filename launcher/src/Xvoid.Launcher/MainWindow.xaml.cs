@@ -12,6 +12,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Icon = App.LoadWindowIcon();
         DataContext = _vm;
         Loaded += (_, _) =>
         {
