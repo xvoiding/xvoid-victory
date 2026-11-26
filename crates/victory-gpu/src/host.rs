@@ -885,7 +885,10 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            device = high_performance_device();
+            if device.is_none() {
+                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
         }
@@ -951,7 +954,15 @@ fn create() -> windows::core::Result<Host> {
         let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
-        tracing::info!("host D3D12 device ready");
+        match adapter.as_ref().and_then(|a| a.GetDesc1().ok()) {
+            Some(desc) => tracing::info!(
+                card = %card_name(&desc),
+                vendor = format_args!("{:#x}", desc.VendorId),
+                memory_mb = desc.DedicatedVideoMemory >> 20,
+                "host D3D12 device ready"
+            ),
+            None => tracing::info!("host D3D12 device ready"),
+        }
         Ok(Host {
             device,
             queue,
@@ -980,6 +991,43 @@ impl Host {
     }
 }
 
+/// A device on the first card, in the system's order for high performance,
+/// that makes one: on a laptop with two GPUs the default adapter may be the
+/// integrated one. `None`, and the default adapter is then used, where the
+/// system names no such card, or with `VICTORY_GPU=default` (the default
+/// adapter follows the choice made for this executable in Windows' graphics
+/// settings).
+fn high_performance_device() -> Option<ID3D12Device> {
+    if std::env::var_os("VICTORY_GPU").is_some_and(|v| v == "default") {
+        return None;
+    }
+    // SAFETY: plain DXGI queries and D3D12 device creation.
+    unsafe {
+        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        // The list ends at the first index that is refused.
+        for i in 0.. {
+            let adapter: IDXGIAdapter1 = factory
+                .EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
+                .ok()?;
+            let software = adapter
+                .GetDesc1()
+                .is_ok_and(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0);
+            let mut device: Option<ID3D12Device> = None;
+            if !software && D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok()
+            {
+                return device;
+            }
+        }
+        None
+    }
+}
+
+/// An adapter's name as the system gives it, without the zeros after it.
+fn card_name(desc: &DXGI_ADAPTER_DESC1) -> String {
+    let end = desc.Description.iter().position(|&c| c == 0);
+    String::from_utf16_lossy(&desc.Description[..end.unwrap_or(desc.Description.len())])
+}
+
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
 /// Reject it before creating a device in diagnostics' software-only mode.
 pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
@@ -1004,6 +1052,23 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    /// The device made for high performance is on a hardware card, whose name
+    /// is printed (`--nocapture`). Nothing to check where there is none.
+    #[test]
+    fn the_high_performance_device_is_on_a_card() {
+        use windows::Win32::Graphics::Dxgi::*;
+        let Some(device) = super::high_performance_device() else { return };
+        // SAFETY: plain queries.
+        let desc = unsafe {
+            CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+                .and_then(|f| f.EnumAdapterByLuid::<IDXGIAdapter1>(device.GetAdapterLuid()))
+                .and_then(|a| a.GetDesc1())
+                .expect("the device's adapter")
+        };
+        eprintln!("high performance card: {}", super::card_name(&desc));
+        assert_eq!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0);
+    }
+
     /// A list of ours is found by its name, with the debug layer's note or not.
     #[cfg(feature = "diagnostics")]
     #[test]

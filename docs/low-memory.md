@@ -30,13 +30,14 @@ card's memory into the PC's, which ended runs 20 and 24").
    is slow and not a crash. The title also needs several GiB of free Windows
    commit at startup ([README-fxceless.md](README-fxceless.md)). Close browsers and
    launchers first.
-2. **The right GPU.** The host device is made on the default adapter
-   (`D3D12CreateDevice(None, ...)`, `crates/victory-gpu/src/host.rs`), so on a
-   laptop with an Intel iGPU and an NVIDIA card **Windows decides, per
-   executable**: Settings, System, Display, Graphics, add `victory.exe`, Options,
-   *High performance*. Then check in Task Manager's GPU tab, during play, that the
-   RTX 4060 is the one with load and the Intel one is not. (Some laptops also have
-   a dGPU-only switch in the maker's tool; that works too.)
+2. **The right GPU.** The layer asks Windows for the high-performance card and
+   makes its device there (`high_performance_device`,
+   `crates/victory-gpu/src/host.rs`), so on a laptop with an Intel iGPU and an
+   NVIDIA card it should be the NVIDIA one. The log's line `host D3D12 device
+   ready` names the card. Check in Task Manager's GPU tab, during play, that the
+   RTX 4060 is the one with load. To use Windows' default adapter instead, which
+   follows the choice made per executable (Settings, System, Display, Graphics):
+   `scripts\play.ps1 ... -More @{VICTORY_GPU='default'}`.
 3. **Plugged in, performance power mode**, and in the NVIDIA Control Panel (Manage
    3D settings, Program settings, `victory.exe`) *Power management mode: Prefer
    maximum performance*. The slowest part on the 7900 XTX fork's machine was one
