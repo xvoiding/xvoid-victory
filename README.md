@@ -99,6 +99,8 @@ scripts\play.ps1 -Exe <your exe>                     # one run, writes down the 
 scripts\prep.ps1 -Exe <your exe> -Warm               # those pipelines made ahead, for a new driver or build
 ```
 
+There is also a launcher with a setup wizard, a Prepare page and live frame statistics: [launcher/README.md](launcher/README.md).
+
 Commands, debugging switches and upstream's own description:
 [docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
 described in a comment where it is read.

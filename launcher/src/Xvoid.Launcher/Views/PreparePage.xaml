@@ -1,0 +1,64 @@
+<UserControl x:Class="Xvoid.Launcher.Views.PreparePage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+            <TextBlock Text="Prepare" Style="{StaticResource Title}" />
+            <TextBlock Style="{StaticResource Caption}" Margin="0,4,0,0" MaxWidth="640"
+                       Text="The engine translates the game's shaders and builds GPU pipelines while you play, and every one it has to make mid-game is a stutter. Doing both ahead of time moves that wait here. Both steps can be stopped and carry on later." />
+
+            <Border Style="{StaticResource Card}" Margin="0,24,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="1  Translate shaders" Style="{StaticResource Heading}" />
+                        <TextBlock Text="{Binding ShadersState}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
+                        <TextBlock Text="{Binding HostNote}" Style="{StaticResource Caption}" Foreground="{StaticResource Faint}" Margin="0,2,0,0" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="Start" Style="{StaticResource SecondaryButton}" Command="{Binding ShadersCommand}" VerticalAlignment="Center" MinWidth="96" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="2  Build pipelines" Style="{StaticResource Heading}" />
+                        <TextBlock Text="{Binding PipelinesState}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="Start" Style="{StaticResource SecondaryButton}" Command="{Binding PipelinesCommand}" VerticalAlignment="Center" MinWidth="96" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0" Visibility="{Binding HasMessage, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding Message}" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Content="Stop" Style="{StaticResource SecondaryButton}" Command="{Binding CancelCommand}" Padding="14,6" />
+                    </Grid>
+                    <ProgressBar Value="{Binding Progress}" Margin="0,14,0,0" Visibility="{Binding Indeterminate, Converter={StaticResource NotToVis}}" />
+                    <Border Height="6" Margin="0,14,0,0" CornerRadius="3" Background="#1FFFFFFF" ClipToBounds="True"
+                            Visibility="{Binding Indeterminate, Converter={StaticResource BoolToVis}}">
+                        <Border Width="120" HorizontalAlignment="Left" CornerRadius="3" Background="{StaticResource AccentGradient}">
+                            <Border.RenderTransform><TranslateTransform /></Border.RenderTransform>
+                            <Border.Triggers>
+                                <EventTrigger RoutedEvent="Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)" From="0" To="520" Duration="0:0:1.4">
+                                                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut" /></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Border.Triggers>
+                        </Border>
+                    </Border>
+                    <TextBlock Text="{Binding LastLine}" Style="{StaticResource Caption}" FontFamily="{StaticResource MonoFont}" FontSize="11"
+                               Margin="0,12,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Foreground="{StaticResource Faint}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

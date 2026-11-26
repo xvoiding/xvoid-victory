@@ -76,3 +76,8 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Launcher build output
+/launcher/dist/
+/launcher/**/bin/
+/launcher/**/obj/

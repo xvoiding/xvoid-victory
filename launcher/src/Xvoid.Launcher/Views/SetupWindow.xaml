@@ -1,0 +1,125 @@
+<Window x:Class="Xvoid.Launcher.Views.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="Set up" Width="700" Height="620" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{StaticResource Bg}" FontFamily="{StaticResource UiFont}" FontSize="14" Foreground="{StaticResource Text}">
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="40" ResizeBorderThickness="0" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
+    <Border BorderBrush="{StaticResource Border}" BorderThickness="1">
+        <Grid>
+            <Rectangle Fill="{StaticResource Wash}" IsHitTestVisible="False" />
+            <Grid Margin="40,44,40,28">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+
+                <TextBlock Text="{Binding StepText}" Style="{StaticResource Overline}" />
+
+                <Grid Grid.Row="1" Margin="0,8,0,16">
+                    <!-- 0: what this is -->
+                    <StackPanel Visibility="{Binding IsStep0, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="Welcome" Style="{StaticResource Title}" />
+                        <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}"
+                                   Text="This launcher starts a community compatibility layer that runs an Xbox Series game natively on Windows. It sets up the engine, checks that this PC can hold it, and prepares the game's shaders so the first start is smoother." />
+                        <Border Style="{StaticResource Card}" Margin="0,20,0,0" Padding="16,14">
+                            <StackPanel>
+                                <TextBlock Text="Before you go on" Style="{StaticResource Heading}" />
+                                <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" Foreground="{StaticResource Text}"
+                                           Text="You need your own copy of the game's files. Nothing here includes, downloads or unlocks any game content, and this project is not affiliated with or endorsed by the game's developer or publisher." />
+                                <TextBlock Style="{StaticResource Caption}" Margin="0,10,0,0" Foreground="{StaticResource Text}"
+                                           Text="It is experimental. On a typical laptop expect single-digit frame rates and missing effects; a 24 GB card and 64 GB of RAM is what it was tuned on." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- 1: game -->
+                    <StackPanel Visibility="{Binding IsStep1, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="Your game" Style="{StaticResource Title}" />
+                        <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}"
+                                   Text="Choose the folder that holds your copy of the game's files. The engine reads everything from there." />
+                        <Grid Margin="0,20,0,0" DataContext="{Binding Settings}">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBox Text="{Binding GamePath, Mode=OneWay}" IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Choose folder" Style="{StaticResource SecondaryButton}" Command="{Binding BrowseGameCommand}" Margin="8,0,0,0" />
+                        </Grid>
+                        <TextBlock Text="{Binding Settings.GameProblem}" Foreground="{StaticResource Warn}" FontSize="12" Margin="0,8,0,0"
+                                   Visibility="{Binding Settings.GameProblem, Converter={StaticResource NullToVis}}" />
+                    </StackPanel>
+
+                    <!-- 2: system -->
+                    <StackPanel Visibility="{Binding IsStep2, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="Your PC" Style="{StaticResource Title}" />
+                        <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}" Text="What decides whether the engine runs at all. A warning is not a stop; the fixes are one click." />
+                        <ScrollViewer Margin="0,12,0,0" VerticalScrollBarVisibility="Auto" MaxHeight="340">
+                            <ItemsControl ItemsSource="{Binding Settings.Checks}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="56" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Mark}" Foreground="{Binding Brush}" FontSize="11" FontWeight="SemiBold" Margin="0,2,0,0" />
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="2" Content="{Binding FixLabel}" Style="{StaticResource SecondaryButton}" Command="{Binding FixCommand}"
+                                                    Padding="12,6" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                    Visibility="{Binding HasFix, Converter={StaticResource BoolToVis}}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </StackPanel>
+
+                    <!-- 3: engine -->
+                    <StackPanel Visibility="{Binding IsStep3, Converter={StaticResource BoolToVis}}" DataContext="{Binding Engine}">
+                        <TextBlock Text="Engine" Style="{StaticResource Title}" />
+                        <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}"
+                                   Text="The launcher downloads the engine from the project's releases and checks its SHA-256 before unpacking. If you build it yourself, choose a local build on the Engine page." />
+                        <Border Style="{StaticResource Card}" Margin="0,20,0,0" Padding="16,14">
+                            <StackPanel>
+                                <TextBlock Text="{Binding Installed, StringFormat=Installed: {0}}" Style="{StaticResource Heading}" />
+                                <TextBlock Text="{Binding Status}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                                <ProgressBar Value="{Binding Progress}" Margin="0,12,0,0" Visibility="{Binding ShowProgress, Converter={StaticResource BoolToVis}}" />
+                                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                    <Button Content="Check" Style="{StaticResource SecondaryButton}" Command="{Binding CheckCommand}" Margin="0,0,8,0" />
+                                    <Button Content="Install" Style="{StaticResource PrimaryButton}" Command="{Binding InstallCommand}" Padding="22,9" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- 4: preset -->
+                    <StackPanel Visibility="{Binding IsStep4, Converter={StaticResource BoolToVis}}" DataContext="{Binding Settings}">
+                        <TextBlock Text="Preset" Style="{StaticResource Title}" />
+                        <TextBlock Margin="0,12,0,16" Foreground="{StaticResource Dim}" Text="You can change this any time in Settings." />
+                        <RadioButton Style="{StaticResource ChoiceCard}" GroupName="setupPreset" IsChecked="{Binding PresetAuto, Mode=TwoWay}">
+                            <StackPanel>
+                                <TextBlock Text="Auto" FontWeight="SemiBold" />
+                                <TextBlock Text="The engine's fast paths, sized to this PC. Start here." Style="{StaticResource Caption}" />
+                            </StackPanel>
+                        </RadioButton>
+                        <RadioButton Style="{StaticResource ChoiceCard}" GroupName="setupPreset" IsChecked="{Binding PresetSafe, Mode=TwoWay}">
+                            <StackPanel>
+                                <TextBlock Text="Safe" FontWeight="SemiBold" />
+                                <TextBlock Text="Without the newer paths. Use it if Auto crashes." Style="{StaticResource Caption}" />
+                            </StackPanel>
+                        </RadioButton>
+                        <TextBlock Margin="0,12,0,0" Style="{StaticResource Caption}"
+                                   Text="After this, open Prepare once: translating shaders ahead of time saves most of the first-run stutter." />
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding Blocker}" Foreground="{StaticResource Warn}" FontSize="12" VerticalAlignment="Center"
+                               Visibility="{Binding Blocker, Converter={StaticResource NullToVis}}" />
+                    <Button Grid.Column="1" Content="Back" Style="{StaticResource SecondaryButton}" Command="{Binding BackCommand}" Margin="0,0,8,0" />
+                    <Button Grid.Column="2" Content="{Binding NextText}" Style="{StaticResource PrimaryButton}" Command="{Binding NextCommand}" Padding="26,9" />
+                </Grid>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

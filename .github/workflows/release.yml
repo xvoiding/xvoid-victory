@@ -1,0 +1,75 @@
+name: release
+
+# Tag a version (v0.1.0) to publish the engine build and the launcher together. The launcher downloads the engine
+# asset and refuses it unless its .sha256 file is published beside it, so both files must stay in the release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  engine:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup on the runner reads rust-toolchain.toml and installs the pinned toolchain on the first cargo call.
+      - uses: Swatinem/rust-cache@v2
+      # The build every measurement in docs/ is of: the diag profile with the diagnostics counters.
+      - name: Build the engine
+        run: cargo build --locked --profile diag -p victory --features diagnostics
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/diag/victory.exe dist/victory.exe
+          Copy-Item LICENSE dist/LICENSE
+          Compress-Archive -Path dist/victory.exe, dist/LICENSE -DestinationPath victory-engine-win-x64.zip -Force
+          $h = (Get-FileHash victory-engine-win-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  victory-engine-win-x64.zip" | Set-Content victory-engine-win-x64.zip.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine
+          path: |
+            victory-engine-win-x64.zip
+            victory-engine-win-x64.zip.sha256
+
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test
+        run: dotnet test launcher/XvoidLauncher.sln -c Release
+      - name: Publish
+        shell: pwsh
+        run: ./launcher/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: |
+            launcher/dist/xvoid-launcher.exe
+            launcher/dist/xvoid-launcher.exe.sha256
+
+  publish:
+    needs: [engine, launcher]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" assets/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --prerelease \
+            --notes "Engine build and launcher. Needs your own copy of the game's files; none are included. Experimental."

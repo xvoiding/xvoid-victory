@@ -16,6 +16,8 @@ const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
+    // The launcher (launcher/): C# and WPF source and project files, all text we write.
+    "cs", "csproj", "xaml", "props", "sln", "manifest",
 ];
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
