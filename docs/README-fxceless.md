@@ -45,7 +45,7 @@ Tested on one machine: Windows 11, Intel i7-14700KF, NVIDIA RTX 4070 12 GB,
 | Saves | the game autosaves a checkpoint and loads it again |
 | First gameplay scene (the prologue) | renders: characters, textures, sky, sunlit exterior; HUD, pause menu and pad input work |
 | Light in shadow | missing: the game's ray-traced bounce light and ray-traced lamp and sun shadows do not run yet, so anything the sun does not hit directly is black |
-| Frame rate in the world | 2-4 fps: 420-450 ms per frame by default, 240-350 ms with the newer switches (`VICTORY_RELAY=2`, or `VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_CARD_BUFFERS_MB=1024`); it started at 3-6 seconds per frame |
+| Frame rate in the world | 2-4 fps: 420-450 ms per frame by default, 240-350 ms with the newer switches (`VICTORY_RELAY=2`, or `VICTORY_LATE_WAIT=3 VICTORY_WIDE_BACK=1 VICTORY_CARD_BUFFERS_MIN_MB=1 VICTORY_CARD_BUFFERS_MB=1024`; all but the two card-buffer sizes are the defaults now, see below); it started at 3-6 seconds per frame |
 | Stability | no driver hang or device loss in normal runs (a hang introduced by the wave64 update was found and fixed: its barrier form for 64-lane programs is now off unless `VICTORY_WAVE_WIDE=1`) |
 
 ### Newest (2026-11-25, later the same day)
@@ -90,8 +90,9 @@ Memory sync between the title's memory and the copies on the card:
   guarded again in between no longer fails the read.
 - Writes of the storage layer into physical pages are counted where the title
   has those pages mapped (10,000 to 50,000 guarded blocks of copies lay under
-  them in every run) and can open the guards there:
-  `VICTORY_PAGE_WRITES=guards` (off by default; `1`, `slots`, `all` do more).
+  them in every run) and the guards there are opened (by default, as
+  `VICTORY_PAGE_WRITES=guards`; `0` counts them only; `1`, `slots`, `all` do
+  more or other things).
 - Failed page-destination reads are retried (`VICTORY_DSTORAGE_RETRIES=0` = as before).
 
 Card memory (the test card is full from the first frame of the world: 85 to
@@ -104,18 +105,24 @@ use):
   runs on the software adapter; it has not run on a card yet.
 - Refused texture slots are held back for a few seconds so that a pass
   reaches the slots behind them (`VICTORY_FULL_CARD_PASS=0` = as before);
-  room can be kept for the card copies of title buffers
-  (`VICTORY_CARD_ROOM_FOR_BUFFERS=1`, off).
+  room is kept for the card copies of title buffers
+  (`VICTORY_CARD_ROOM_FOR_BUFFERS=0` = as before).
 
 Tools and diagnostics:
 - `victory translate <shader file> --warm all --jobs N` translates every
   shader ahead of a run, on the processor only (about 4.5 to 6.5 minutes
-  here); the shader cache is keyed on the translator's source, so a new
-  build that does not touch the translator starts warm.
-- Counters, all off or diagnostics-only: `VICTORY_MERGE_RACE=1` (title bytes
-  a copy-back is about to put back to older values: none found in 138,000
-  copy-backs), `VICTORY_WALLS_TRACE`, `VICTORY_CARD_ACCOUNTING`, and a census
-  of the copies the texture sweep never lets go.
+  here); the shader cache is keyed on the translator's version
+  (`victory_shader::TRANSLATOR_VERSION`, bumped with any change of what it
+  makes), so a new build starts warm unless the version moved. Entries an
+  earlier build of the same version made are served; `victory shaders`
+  translates them again and says how many came out different
+  (`VICTORY_SHADER_FRESH=1` does so in a run, `VICTORY_SHADER_KEY=source`
+  keys by the translator's source as before).
+- Counters, all off or diagnostics-only: `VICTORY_WALLS_TRACE`,
+  `VICTORY_CARD_ACCOUNTING`, and a census of the copies the texture sweep
+  never lets go. (A counter of title bytes a copy-back was about to put back
+  to older values found none in 138,000 copy-backs; it has been taken out
+  since.)
 
 ### What this fork changed (summary)
 
@@ -140,12 +147,23 @@ Speed and memory:
 
 - Translated shaders get clean-up passes over the finished module (dead code, constant folding, reuse of values, branch facts); the pack's host instruction count falls by about 43 %, worth about 20 ms of GPU time per frame on the test machine (`VICTORY_SHADER_OPT=0` turns them off).
 
-Most of the newer speed changes sit behind environment switches that are off
-by default (`VICTORY_LATE_WAIT`, `VICTORY_RELAY`, `VICTORY_WIDE_BACK`,
-`VICTORY_CARD_BUFFERS_MIN_MB`, `VICTORY_INPLACE`, `VICTORY_BVH_BUILDER`, ...).
-Independent host-copy refreshes are the exception: they use parallel workers
-automatically on systems with at least four logical CPUs. Each switch is
-described in a comment where it is read.
+Most of the newer speed changes sit behind environment switches. Some are
+on by default here:
+- `VICTORY_RELAY`: stage 2 (`=1` the first stage; any other value turns it
+  off);
+- `VICTORY_LATE_WAIT`: stage 3 while the relay is on, else off (`=1`, `=2`,
+  `=3` pick a stage; any other value turns it off, and so does
+  `VICTORY_GPU_TIMING` set to anything);
+- `VICTORY_WIDE_BACK` (`=0` turns it off);
+- independent host-copy refreshes, on systems with at least four logical
+  CPUs (`VICTORY_WIDE_REFRESH`, above).
+
+Others are off by default (`VICTORY_INPLACE`, `VICTORY_BVH_BUILDER`, ...).
+`VICTORY_CARD_BUFFERS_MIN_MB` and `VICTORY_CARD_BUFFERS_MB` are sizes, not
+switches: their defaults follow the card's memory budget.
+`VICTORY_CARD_BUFFERS_MIN_KB`, when set above 0, wins over
+`VICTORY_CARD_BUFFERS_MIN_MB`. Each switch is described in a comment where it
+is read.
 
 ### Known problems
 

@@ -134,6 +134,43 @@ std::arch::global_asm!(
     "mov qword ptr [rax + 8], r11",
     "mov rax, r9",
     "ret",
+    ".globl victory_safe_changed",
+    ".globl victory_safe_changed_at",
+    ".globl victory_safe_changed_after",
+    ".globl victory_safe_changed_failed",
+    // rcx title memory, rdx what was last seen there, r8 records of 32
+    // bytes, r9 a bit per record (zeroed by the caller): each record of
+    // title memory is read once; where it differs from the one last seen it
+    // goes over that one, and then its bit is set. eax: whether all could
+    // be read (where one could not, those before it are done).
+    "victory_safe_changed:",
+    "xor r10d, r10d",
+    "test r8, r8",
+    "jz 3f",
+    "2:",
+    "victory_safe_changed_at:",
+    "vmovdqu ymm0, ymmword ptr [rcx]",
+    "victory_safe_changed_after:",
+    "vpcmpeqb ymm1, ymm0, ymmword ptr [rdx]",
+    "vpmovmskb eax, ymm1",
+    "cmp eax, -1",
+    "je 4f",
+    "vmovdqu ymmword ptr [rdx], ymm0",
+    "bts qword ptr [r9], r10",
+    "4:",
+    "add rcx, 32",
+    "add rdx, 32",
+    "inc r10",
+    "cmp r10, r8",
+    "jb 2b",
+    "3:",
+    "vzeroupper",
+    "mov eax, 1",
+    "ret",
+    "victory_safe_changed_failed:",
+    "vzeroupper",
+    "xor eax, eax",
+    "ret",
 );
 
 unsafe extern "system" {
@@ -149,6 +186,27 @@ unsafe extern "system" {
     fn victory_safe_merge_at();
     fn victory_safe_merge_after();
     fn victory_safe_merge_failed();
+    fn victory_safe_changed(title: *const u8, seen: *mut u8, records: usize, bits: *mut u64) -> u32;
+    fn victory_safe_changed_at();
+    fn victory_safe_changed_after();
+    fn victory_safe_changed_failed();
+}
+
+/// The records of 32 bytes at `title` (`records` of them) that differ from
+/// those in `seen`: each is read once, goes over the one in `seen`, and gets
+/// its bit in `bits` (record n: bit n % 64 of word n / 64). False if a page
+/// of title memory could not be read: then the records before it are done,
+/// and the others are as they were.
+///
+/// # Safety
+/// `seen` holds `records * 32` bytes of ours that nothing else reads or
+/// writes meanwhile, and `bits` at least `records.div_ceil(64)` words, all
+/// 0; `title` is as [`copy`]'s source. [`on`] must have been asked.
+pub(crate) unsafe fn changed(title: *const u8, seen: *mut u8, records: usize, bits: &mut [u64]) -> bool {
+    assert!(bits.len() >= records.div_ceil(64));
+    // SAFETY: a fault reading title memory leaves through the failing exit
+    // ([`failing_exit`]); the rest is the caller's.
+    unsafe { victory_safe_changed(title, seen, records, bits.as_mut_ptr()) != 0 }
 }
 
 /// What [`merge`] did.
@@ -354,6 +412,10 @@ pub(crate) fn failing_exit(at: usize) -> Option<usize> {
     if (from..to).contains(&at) {
         return Some(victory_safe_put_failed as *const () as usize);
     }
+    let (from, to) = (victory_safe_changed_at as *const () as usize, victory_safe_changed_after as *const () as usize);
+    if (from..to).contains(&at) {
+        return Some(victory_safe_changed_failed as *const () as usize);
+    }
     let (from, to) = (victory_safe_merge_at as *const () as usize, victory_safe_merge_after as *const () as usize);
     (from..to).contains(&at).then_some(victory_safe_merge_failed as *const () as usize)
 }
@@ -362,8 +424,9 @@ pub(crate) fn failing_exit(at: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc,
-        VirtualFree, VirtualProtect,
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_GUARD,
+        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect,
+        VirtualQuery,
     };
 
     struct Pages(*mut u8, usize);
@@ -407,6 +470,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The records that differ get their bits and go over those last seen;
+    /// a page that is not there fails, with the records before it done.
+    #[test]
+    fn changed_records_are_found_and_taken() {
+        assert!(on());
+        let pages = Pages::new(3 << 12);
+        pages.fill();
+        let records: usize = (3 << 12) / 32;
+        // SAFETY: inside the allocation.
+        let title = unsafe { std::slice::from_raw_parts(pages.0, pages.1) }.to_vec();
+        let mut seen = title.clone();
+        let mut differ = Vec::new();
+        for n in [0usize, 1, 63, 64, 65, 200, 383] {
+            seen[n * 32 + n % 32] ^= 0x11;
+            differ.push(n);
+        }
+        let mut bits = vec![0u64; records.div_ceil(64)];
+        // SAFETY: inside the allocation; `seen` and `bits` are ours.
+        assert!(unsafe { changed(pages.0, seen.as_mut_ptr(), records, &mut bits) });
+        let found: Vec<usize> = (0..records).filter(|n| bits[n / 64] >> (n % 64) & 1 != 0).collect();
+        assert_eq!(found, differ);
+        assert_eq!(seen, title);
+        bits.fill(0);
+        // SAFETY: as above.
+        assert!(unsafe { changed(pages.0, seen.as_mut_ptr(), records, &mut bits) });
+        assert!(bits.iter().all(|&b| b == 0));
+        // The second page is not there: records 0 and 200 (on the third) differ.
+        for n in [0usize, 200] {
+            seen[n * 32] ^= 0x22;
+        }
+        // SAFETY: a page of our allocation.
+        unsafe { VirtualFree(pages.0.add(4096).cast(), 4096, MEM_DECOMMIT) };
+        let mut bits = vec![0u64; records.div_ceil(64)];
+        // SAFETY: as above; the page that is not there fails the call.
+        assert!(!unsafe { changed(pages.0, seen.as_mut_ptr(), records, &mut bits) });
+        let found: Vec<usize> = (0..records).filter(|n| bits[n / 64] >> (n % 64) & 1 != 0).collect();
+        assert_eq!(found, [0]);
+        assert_eq!(seen[..32], title[..32]);
+        assert_ne!(seen[200 * 32..201 * 32], title[200 * 32..201 * 32]);
     }
 
     /// The dwords that changed are stored, and no byte of any other, at
@@ -717,5 +821,82 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// Whether the page at `at` is a guard page.
+    fn guarded(at: usize) -> bool {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: a valid out pointer of the right size.
+        assert_ne!(unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) }, 0);
+        info.Protect & PAGE_GUARD != 0
+    }
+
+    /// A guard page in the source fails the copy, and stays a guard page: the
+    /// fault that reported it cleared the flag, so it is set again.
+    #[test]
+    fn a_guard_page_fails_the_copy_and_stays_a_guard_page() {
+        assert!(on());
+        let (a, mut to) = (Pages::new(2 << 12), vec![0u8; 2 << 12]);
+        let mut old = 0;
+        // SAFETY: pages of our allocation; the second is made a guard page.
+        unsafe {
+            assert_ne!(
+                VirtualProtect(a.0.add(4096).cast(), 4096, PAGE_READWRITE | PAGE_GUARD, &mut old),
+                0
+            );
+            assert!(!copy(to.as_mut_ptr(), a.0, 8192));
+        }
+        assert!(guarded(a.0.addr() + 4096), "the guard flag was consumed");
+    }
+
+    /// Two pages, the second a guard page.
+    fn guard_second_page() -> Pages {
+        let pages = Pages::new(2 << 12);
+        let mut old = 0;
+        // SAFETY: the second page of our allocation.
+        unsafe {
+            assert_ne!(
+                VirtualProtect(pages.0.add(4096).cast(), 4096, PAGE_READWRITE | PAGE_GUARD, &mut old),
+                0
+            );
+        }
+        pages
+    }
+
+    /// A copy into a guard page fails, and the page stays a guard page.
+    #[test]
+    fn a_guard_page_in_the_destination_fails_a_copy_and_stays_guarded() {
+        assert!(on());
+        let pages = guard_second_page();
+        let at = pages.0.addr() + 4096;
+        let src = vec![0x5Au8; 4096];
+        // SAFETY: the destination is a guard page of our allocation; the source is ours.
+        assert!(!unsafe { copy(at as *mut u8, src.as_ptr(), 4096) });
+        assert!(guarded(at), "the copy's fault cleared the guard flag");
+    }
+
+    /// A put into a guard page fails, and the page stays a guard page.
+    #[test]
+    fn a_guard_page_in_the_destination_fails_a_put_and_stays_guarded() {
+        assert!(on());
+        let pages = guard_second_page();
+        let at = pages.0.addr() + 4096;
+        let (was, now) = (vec![0u8; 4096], vec![0x5Au8; 4096]);
+        // SAFETY: as above; every dword differs, so every block is written.
+        assert!(!unsafe { put_changed(at as *mut u8, &was, &now) });
+        assert!(guarded(at), "the put's fault cleared the guard flag");
+    }
+
+    /// A merge into a guard page fails, and the page stays a guard page.
+    #[test]
+    fn a_guard_page_in_the_destination_fails_a_merge_and_stays_guarded() {
+        assert!(on());
+        let pages = guard_second_page();
+        let at = pages.0.addr() + 4096;
+        let (now, mut held) = (vec![0x5Au8; 4096], vec![0u8; 4096]);
+        // SAFETY: as above; `now` and `held` are ours and do not overlap.
+        let merged = unsafe { merge(at as *mut u8, now.as_ptr(), held.as_mut_ptr(), 4096, false) };
+        assert!(!merged.there);
+        assert!(guarded(at), "the merge's fault cleared the guard flag");
     }
 }

@@ -7,7 +7,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::{DLL_PROCESS_DETACH, LoadedImage};
@@ -78,6 +78,13 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 /// (a thread ended while holding a lock their detach code wants).
 const DETACH_DEADLINE: Duration = Duration::from_secs(5);
 
+static BEFORE_THREAD_SHUTDOWN: OnceLock<fn()> = OnceLock::new();
+
+/// Runs the title runner's final save while worker threads can still release locks.
+pub fn set_before_thread_shutdown(save: fn()) {
+    let _ = BEFORE_THREAD_SHUTDOWN.set(save);
+}
+
 /// Process exit (the CRT's `exit`, which titles call), in `ExitProcess`'s
 /// order: the title's exit functions have run; every other thread ends
 /// (title threads and ours); every attached image gets
@@ -127,6 +134,11 @@ extern "C" fn detach_all() {
             id => break id,
         }
     };
+    // A stalled save is covered by the same deadline as detach. A worker
+    // already saving must be able to finish before we end the other threads.
+    if let Some(save) = BEFORE_THREAD_SHUTDOWN.get() {
+        save();
+    }
     end_other_threads(&[watchdog]);
     for image in dlls.iter().chain(&exes) {
         // SAFETY: attached images are bound. A non-null third argument

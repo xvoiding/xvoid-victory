@@ -19,6 +19,10 @@ blake3.workspace = true
 memchr.workspace = true
 clap.workspace = true
 walkdir.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 # Debug-level logs and the debugging switches (frame capture, stack dumps,

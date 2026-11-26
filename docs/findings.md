@@ -85,7 +85,8 @@ in that order of size:
    for the next submission while this one is sent; view the card's own buffers where fills
    copy them now.
 2. The card: small buffers' copies in its own memory (`VICTORY_CARD_BUFFERS_MIN_KB=64`,
-   after fxceless c36971b2; not measured here yet), and the passes that run for nothing
+   after fxceless c36971b2, wins over `VICTORY_CARD_BUFFERS_MIN_MB`; not measured here
+   yet), and the passes that run for nothing
    without rays.
 3. Stalls: 270-660 s of a session were full of frames over 200 ms, almost all while new
    pipelines were made. `victory warm`, and a quarter of the workers for the slow ones.

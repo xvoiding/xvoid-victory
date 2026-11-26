@@ -4,7 +4,8 @@
 //! (`files`).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use super::xasync::{self, AsyncBlock, E_ABORT};
 use super::xgameruntime::{
@@ -87,18 +88,19 @@ pub struct SpaceInfo {
     pub total: u64,
 }
 
-fn used_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|e| match e.metadata() {
-            Ok(m) if m.is_dir() => used_bytes(&e.path()),
-            Ok(m) => m.len(),
-            Err(_) => 0,
-        })
-        .sum()
+fn used_bytes(dir: &Path) -> Result<u64, (PathBuf, io::Error)> {
+    let at_dir = |error| (dir.to_owned(), error);
+    let mut used = 0;
+    for entry in std::fs::read_dir(dir).map_err(at_dir)? {
+        let entry = entry.map_err(at_dir)?;
+        let metadata = entry.metadata().map_err(|error| (entry.path(), error))?;
+        used += if metadata.is_dir() {
+            used_bytes(&entry.path())?
+        } else {
+            metadata.len()
+        };
+    }
+    Ok(used)
 }
 
 /// What the host disk under `dir` has free (unlimited if unknown).
@@ -126,21 +128,30 @@ pub(crate) fn disk_free(dir: &Path) -> u64 {
     u64::MAX
 }
 
-fn space() -> SpaceInfo {
+fn space() -> Result<SpaceInfo, HRESULT> {
     let title = runtime::title();
-    let used = used_bytes(&title.storage);
+    let used = used_bytes(&title.storage).map_err(|(path, error)| {
+        tracing::warn!(path = %path.display(), %error, "could not read persistent storage usage");
+        E_FAIL
+    })?;
     let free = title.storage_bytes.saturating_sub(used);
-    SpaceInfo {
+    Ok(SpaceInfo {
         // Writable now: the quota's rest, as far as the host disk allows.
         available_free: free.min(disk_free(&title.storage)),
         total_free: free,
         used,
         total: title.storage_bytes,
-    }
+    })
 }
 
 extern "system" fn space_info(_: This, out: *mut SpaceInfo) -> HRESULT {
-    put(out, space())
+    if out.is_null() {
+        return xasync::E_INVALIDARG;
+    }
+    match space() {
+        Ok(info) => put(out, info),
+        Err(hr) => hr,
+    }
 }
 
 /// Tells our prompts apart from other calls on the same block.
@@ -148,10 +159,10 @@ static PROMPT: u8 = 0;
 
 /// There is nobody to ask: granted when the quota has room, else declined.
 extern "system" fn prompt_for_space(_: This, bytes: u64, block: *mut AsyncBlock) -> HRESULT {
-    let hr = if bytes <= space().total_free {
-        S_OK
-    } else {
-        E_ABORT
+    let hr = match space() {
+        Ok(info) if bytes <= info.total_free => S_OK,
+        Ok(_) => E_ABORT,
+        Err(hr) => hr,
     };
     xasync::finished(block, (&raw const PROMPT).cast(), hr)
 }
@@ -178,6 +189,52 @@ mod tests {
     use crate::modules::xgameruntime::method;
 
     #[test]
+    fn empty_storage_uses_zero_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(used_bytes(dir.path()).unwrap(), 0);
+    }
+
+    #[test]
+    fn sums_files_in_nested_storage_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("saves").join("slot");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join("index"), b"abc").unwrap();
+        std::fs::write(nested.join("data"), b"12345").unwrap();
+        assert_eq!(used_bytes(dir.path()).unwrap(), 8);
+    }
+
+    #[test]
+    fn missing_storage_reports_the_failed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let (path, error) = used_bytes(&missing).unwrap_err();
+        assert_eq!(path, missing);
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_subdirectory_fails_the_whole_scan() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("slot");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(dir.path().join("index"), b"abc").unwrap();
+        // Deny a second open of this directory for the duration of the scan.
+        let _exclusive = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&nested)
+            .unwrap();
+        let (path, _) = used_bytes(dir.path()).unwrap_err();
+        assert_eq!(path, nested);
+    }
+
+    #[test]
     fn serves_a_drive_over_the_title_folder_and_its_quota() {
         type Size = extern "system" fn(This, *mut usize) -> HRESULT;
         type Get = extern "system" fn(This, usize, *mut u8, *mut usize) -> HRESULT;
@@ -187,6 +244,7 @@ mod tests {
         let this: This = &OBJECT;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("save.dat"), [0u8; 100]).unwrap();
+        let previous_title = runtime::title();
         runtime::set_title(runtime::Title {
             id: 1,
             storage: dir.path().to_owned(),
@@ -220,12 +278,13 @@ mod tests {
             used: 0,
             total: 0,
         };
-        assert_eq!(method::<Space>(&OBJECT, 0x28)(this, &mut info), S_OK);
+        let query = method::<Space>(&OBJECT, 0x28);
+        assert_eq!(query(this, &mut info), S_OK);
         assert_eq!((info.used, info.total_free, info.total), (100, 900, 1000));
 
         let prompt = method::<Prompt>(&OBJECT, 0x30);
         let result = method::<Result>(&OBJECT, 0x38);
-        for (bytes, expect) in [(900, S_OK), (901, E_ABORT)] {
+        let check_prompt = |bytes, expect| {
             let mut block = AsyncBlock {
                 queue: std::ptr::null(),
                 context: std::ptr::null_mut(),
@@ -233,8 +292,26 @@ mod tests {
                 internal: [0; 4],
             };
             assert_eq!(prompt(this, bytes, &mut block), S_OK);
-            assert_eq!(xasync::XAsyncGetStatus(&mut block, true), expect);
-            assert_eq!(result(this, &mut block), expect, "{bytes} bytes");
-        }
+            assert_eq!(
+                (xasync::XAsyncGetStatus(&mut block, true), result(this, &mut block)),
+                (expect, expect),
+                "{bytes} bytes"
+            );
+        };
+        check_prompt(900, S_OK);
+        check_prompt(901, E_ABORT);
+
+        // A regular file cannot be enumerated as a storage directory.
+        runtime::set_title(runtime::Title {
+            storage: dir.path().join("save.dat"),
+            ..runtime::title()
+        });
+        check_prompt(1000, E_FAIL);
+        check_prompt(0, E_FAIL);
+        let previous = info;
+        assert_eq!(query(this, &mut info), E_FAIL);
+        assert_eq!(info, previous);
+        assert_eq!(query(this, std::ptr::null_mut()), xasync::E_INVALIDARG);
+        runtime::set_title(previous_title);
     }
 }

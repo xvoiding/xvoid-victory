@@ -1,5 +1,7 @@
 //! Survey shader containers: bitcode, console additions and native code.
 
+pub(crate) mod scan;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -74,22 +76,9 @@ struct Totals {
 pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let mut t = Totals::default();
+    let mut scan = scan::FileScan::new(MAX_FILE, verbose);
     for root in &paths {
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE {
-                eprintln!("skipping large file {}", path.display());
-                continue;
-            }
-            let Ok(data) = std::fs::read(path) else {
-                continue;
-            };
+        for (path, data) in scan.files(root) {
             let mut found_here = 0;
             for source in sources(&data) {
                 let Some(bytes) = source.bytes() else {
@@ -218,6 +207,7 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     if t.containers == 0 {
         println!("(none found: shaders may sit in compressed or encrypted archives)");
     }
+    println!("{scan}");
     Ok(())
 }
 

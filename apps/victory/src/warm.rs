@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -68,49 +68,35 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         bad.len(),
         all.len()
     );
-    let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
-    let next = AtomicUsize::new(0);
     let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
     let slow_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("slow-pipelines.txt"))?);
     let bad_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&bad_file)?);
-    std::thread::scope(|s| {
-        for _ in 0..jobs.min(chunks.len()) {
-            s.spawn(|| {
-                while let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let mut rest = chunk;
-                    while !rest.is_empty() {
-                        let (made, ended) = child(rest, |n, ms, there| {
-                            if ms >= SLOW_MS {
-                                let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
-                            }
-                            let mut state = lock(&state);
-                            state.0.push(ms);
-                            state.1 += usize::from(!there);
-                            let count = state.0.len();
-                            if count % 1000 == 0 {
-                                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
-                            }
-                            drop(state);
-                            let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
-                        });
-                        rest = &rest[made.min(rest.len())..];
-                        match (ended, rest.split_first()) {
-                            (Some(why), Some((&n, after))) => {
-                                // The one it was at.
-                                println!("pipeline {n} {}: {why}", keys[n]);
-                                let _ = writeln!(lock(&bad_out), "{} {why}", keys[n]);
-                                lock(&state).2 += 1;
-                                rest = after;
-                            }
-                            _ => break,
-                        }
-                    }
-                }
-            });
-        }
-    });
+    run_batches(
+        &all,
+        jobs,
+        start_worker,
+        |n, ms, there| {
+            if ms >= SLOW_MS {
+                let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
+            }
+            let mut state = lock(&state);
+            state.0.push(ms);
+            state.1 += usize::from(!there);
+            let count = state.0.len();
+            if count.is_multiple_of(1000) {
+                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
+            }
+            drop(state);
+            let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
+        },
+        |n, why| {
+            println!("pipeline {n} {}: {why}", keys[n]);
+            let _ = writeln!(lock(&bad_out), "{} {why}", keys[n]);
+            lock(&state).2 += 1;
+        },
+    )?;
     let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
@@ -127,26 +113,78 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     Ok(())
 }
 
+fn run_batches(
+    all: &[usize],
+    jobs: usize,
+    start: impl Fn(&[usize]) -> Result<Child> + Sync,
+    each: impl Fn(usize, f64, bool) + Sync,
+    bad: impl Fn(usize, String) + Sync,
+) -> Result<()> {
+    let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
+    let next = AtomicUsize::new(0);
+    // Stop launching workers after a setup failure. In-flight workers can still report.
+    let failure = OnceLock::new();
+    std::thread::scope(|s| {
+        for _ in 0..jobs.min(chunks.len()) {
+            s.spawn(|| {
+                while let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let mut rest = chunk;
+                    while !rest.is_empty() {
+                        if failure.get().is_some() {
+                            return;
+                        }
+                        let outcome = start(rest)
+                            .context("could not start warm worker")
+                            .and_then(|process| child(process, &each));
+                        match outcome {
+                            Ok(Some((made, why))) => {
+                                let remaining = &rest[made.min(rest.len())..];
+                                let Some((&n, after)) = remaining.split_first() else {
+                                    break;
+                                };
+                                bad(n, why);
+                                rest = after;
+                            }
+                            Ok(None) => break,
+                            Err(error) => {
+                                let _ = failure.set(error);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    failure.into_inner().map_or(Ok(()), Err)
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Has a process make `these`; how many it made, and how it ended if not well.
-fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Option<String>) {
+fn start_worker(these: &[usize]) -> Result<Child> {
+    use std::os::windows::process::CommandExt;
+    const IDLE_PRIORITY_CLASS: u32 = 0x40;
+    let exe = std::env::current_exe().context("could not locate the warm worker executable")?;
     let list: Vec<String> = these.iter().map(usize::to_string).collect();
-    let spawned = std::env::current_exe().and_then(|exe| {
-        use std::os::windows::process::CommandExt;
-        const IDLE_PRIORITY_CLASS: u32 = 0x40;
-        Command::new(exe)
-            .args(["warm", "--these", &list.join(",")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(IDLE_PRIORITY_CLASS)
-            .spawn()
-    });
-    let Ok(mut process) = spawned else { return (these.len(), None) };
-    let Some(out) = process.stdout.take() else { return (these.len(), None) };
+    Command::new(&exe)
+        .args(["warm", "--these", &list.join(",")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(IDLE_PRIORITY_CLASS)
+        .spawn()
+        .with_context(|| format!("could not spawn {}", exe.display()))
+}
+
+/// On abnormal exit, return the number of reports before the failure and the exit reason.
+fn child(mut process: Child, mut each: impl FnMut(usize, f64, bool)) -> Result<Option<(usize, String)>> {
+    let Some(out) = process.stdout.take() else {
+        let _ = process.kill();
+        process.wait().context("warm worker stdout unavailable, failed to reap worker")?;
+        anyhow::bail!("warm worker stdout unavailable");
+    };
     let process = Mutex::new(process);
     let (heard, over) = (Mutex::new(Instant::now()), AtomicBool::new(false));
     let hung = AtomicBool::new(false);
@@ -178,14 +216,14 @@ fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Opt
     let status = lock(&process).wait();
     let well = status.as_ref().is_ok_and(|s| s.success());
     if well {
-        return (these.len(), None);
+        return Ok(None);
     }
     let why = if hung.load(Ordering::Relaxed) {
         format!("hung for {} s", LONGEST.as_secs())
     } else {
         status.map_or_else(|e| e.to_string(), |s| format!("{s}"))
     };
-    (made, Some(why))
+    Ok(Some((made, why)))
 }
 
 /// What such a process does.
@@ -207,4 +245,105 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     // Without what a run's end does (nothing to save, the host's threads).
     let _ = out.flush();
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::process::CommandExt;
+
+    fn fake_child(script: &str, stdout: Stdio) -> Result<Child> {
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\cmd.exe");
+        Ok(Command::new(cmd)
+            .args(["/d", "/c"])
+            .raw_arg(script)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::null())
+            .spawn()?)
+    }
+
+    #[test]
+    fn missing_executable_leaves_the_batch_pending() {
+        let missing = std::env::temp_dir().join(format!("victory-missing-worker-{}.exe", std::process::id()));
+        assert!(!missing.try_exists().unwrap());
+        let starts = AtomicUsize::new(0);
+        let done = Mutex::new(Vec::new());
+        let bad = Mutex::new(Vec::new());
+        let result = run_batches(
+            &[7, 8, 9],
+            1,
+            |_| {
+                starts.fetch_add(1, Ordering::Relaxed);
+                Ok(Command::new(&missing).spawn()?)
+            },
+            |n, _, _| lock(&done).push(n),
+            |n, _| lock(&bad).push(n),
+        );
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        assert!(lock(&done).is_empty());
+        assert!(lock(&bad).is_empty());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("start warm worker"));
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn missing_stdout_is_a_startup_failure() {
+        let error = run_batches(
+            &[1, 2],
+            1,
+            |_| fake_child("exit /b 0", Stdio::null()),
+            |_, _, _| panic!("unexpected completion"),
+            |_, _| panic!("unexpected bad pipeline"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("stdout"));
+    }
+
+    #[test]
+    fn worker_exit_records_the_failed_pipeline_and_resumes() {
+        let done = Mutex::new(Vec::new());
+        let bad = Mutex::new(Vec::new());
+        run_batches(
+            &[7, 8, 9],
+            1,
+            |rest| match rest {
+                [7, 8, 9] => fake_child("echo made 7 3.5 1&exit /b 7", Stdio::piped()),
+                [9] => fake_child("echo made 9 2.0 0", Stdio::piped()),
+                _ => panic!("unexpected batch {rest:?}"),
+            },
+            |n, ms, there| lock(&done).push((n, ms, there)),
+            |n, why| lock(&bad).push((n, why)),
+        )
+        .unwrap();
+        assert_eq!(*lock(&done), [(7, 3.5, true), (9, 2.0, false)]);
+        let bad = lock(&bad);
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].0, 8);
+        assert!(!bad[0].1.is_empty());
+    }
+
+    #[test]
+    fn startup_failure_preserves_another_workers_completion() {
+        // Hold the failed start until its peer has reported the only key in its chunk.
+        let keys: Vec<_> = (0..=AT_ONCE).collect();
+        let (confirmed, received) = std::sync::mpsc::channel();
+        let received = Mutex::new(received);
+        let error = run_batches(
+            &keys,
+            2,
+            |chunk| {
+                if chunk[0] == 0 {
+                    assert_eq!(lock(&received).recv_timeout(Duration::from_secs(5)).unwrap(), AT_ONCE);
+                    anyhow::bail!("worker unavailable")
+                }
+                fake_child(&format!("echo made {AT_ONCE} 1 1"), Stdio::piped())
+            },
+            |n, _, _| confirmed.send(n).unwrap(),
+            |_, _| panic!("unexpected bad pipeline"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("worker unavailable"));
+    }
 }

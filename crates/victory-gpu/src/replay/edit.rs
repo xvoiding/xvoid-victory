@@ -217,41 +217,60 @@ pub fn find_clamps(cmds: &[Cmd], psos: &HashSet<u32>, next: &mut u64) -> Vec<Cla
 }
 
 /// The list with a copy of what each clamp wrote into the results.
-pub fn keep_clamped(cmds: Vec<Cmd>, clamps: &[Clamp]) -> Vec<Cmd> {
+pub fn keep_clamped(cmds: Vec<Cmd>, clamps: &[Clamp]) -> anyhow::Result<Vec<Cmd>> {
     let mut out = Vec::with_capacity(cmds.len() + 3 * clamps.len());
-    let mut open: Option<Clamp> = None;
-    for (at, c) in cmds.into_iter().enumerate() {
+    let mut open = None;
+    let mut copied = 0;
+    for (at, mut c) in cmds.into_iter().enumerate() {
         if let Some(clamp) = clamps.iter().find(|c| c.at == at) {
             open = Some(*clamp);
         }
-        let readable = |b: &Barrier, scratch: u32| matches!(b, Barrier::Transition { res, after: INDIRECT_ARGUMENT, .. } if *res == scratch);
-        let done = match (&c, open) {
-            (Cmd::Barriers { all }, Some(clamp)) => all.iter().any(|b| readable(b, clamp.scratch)),
-            _ => false,
+        let (Some(clamp), Cmd::Barriers { all }) = (open, &mut c) else {
+            out.push(c);
+            continue;
         };
+        // BEGIN_ONLY leaves the buffer inaccessible until END_ONLY.
+        let Some(i) = all.iter().position(|b| {
+            matches!(b,
+                Barrier::Transition { flags, res, after: INDIRECT_ARGUMENT, .. }
+                    if flags & 1 == 0 && *res == clamp.scratch
+            )
+        }) else {
+            out.push(c);
+            continue;
+        };
+        // Later barriers in the same call can change its state again.
+        let rest = all.split_off(i + 1);
         out.push(c);
-        if done && let Some(clamp) = open.take() {
-            let moved = |before, after| Cmd::Barriers {
-                all: vec![Barrier::Transition {
-                    flags: 0,
-                    res: clamp.scratch,
-                    sub: ALL,
-                    before,
-                    after,
-                }],
-            };
-            out.push(moved(INDIRECT_ARGUMENT, COPY_SOURCE));
-            out.push(Cmd::CopyBuffer {
-                dst: RESULTS,
-                dst_at: clamp.result,
-                src: clamp.scratch,
-                src_at: 0,
-                len: clamp.bytes,
-            });
-            out.push(moved(COPY_SOURCE, INDIRECT_ARGUMENT));
+        let moved = |before, after| Cmd::Barriers {
+            all: vec![Barrier::Transition {
+                flags: 0,
+                res: clamp.scratch,
+                sub: ALL,
+                before,
+                after,
+            }],
+        };
+        out.push(moved(INDIRECT_ARGUMENT, COPY_SOURCE));
+        out.push(Cmd::CopyBuffer {
+            dst: RESULTS,
+            dst_at: clamp.result,
+            src: clamp.scratch,
+            src_at: 0,
+            len: clamp.bytes,
+        });
+        out.push(moved(COPY_SOURCE, INDIRECT_ARGUMENT));
+        if !rest.is_empty() {
+            out.push(Cmd::Barriers { all: rest });
         }
+        open = None;
+        copied += 1;
     }
-    out
+    anyhow::ensure!(
+        copied == clamps.len(),
+        "clamp capture has no completed scratch transition in its command list"
+    );
+    Ok(out)
 }
 
 /// The list without its clamp passes and the barriers of their scratch
@@ -690,6 +709,56 @@ mod tests {
     }
 
     #[test]
+    fn clamp_copy_waits_for_the_end_of_a_split_transition() {
+        let clamp = Clamp {
+            at: 0,
+            scratch: 7,
+            bytes: 16,
+            result: 256,
+        };
+        let transition = |flags| {
+            barriers(&[Barrier::Transition {
+                flags,
+                res: clamp.scratch,
+                sub: ALL,
+                before: UNORDERED_ACCESS,
+                after: INDIRECT_ARGUMENT,
+            }])
+        };
+        let begin = transition(1);
+        let end = transition(2);
+        let pending = vec![
+            go(),
+            begin,
+            barriers(&[moved(8, UNORDERED_ACCESS, INDIRECT_ARGUMENT)]),
+            pso(3),
+        ];
+        assert!(keep_clamped(pending.clone(), &[clamp]).is_err());
+
+        let mut list = pending;
+        list.push(end);
+        let mut expected = list.clone();
+        expected.extend([
+            barriers(&[moved(7, INDIRECT_ARGUMENT, COPY_SOURCE)]),
+            Cmd::CopyBuffer {
+                dst: RESULTS,
+                dst_at: 256,
+                src: 7,
+                src_at: 0,
+                len: 16,
+            },
+            barriers(&[moved(7, COPY_SOURCE, INDIRECT_ARGUMENT)]),
+        ]);
+        assert_eq!(keep_clamped(list.clone(), &[clamp]).unwrap(), expected);
+        let next = moved(7, INDIRECT_ARGUMENT, UNORDERED_ACCESS);
+        if let Some(Cmd::Barriers { all }) = list.last_mut() {
+            all.push(next.clone());
+        }
+        expected.push(barriers(&[next]));
+        assert_eq!(keep_clamped(list, &[clamp]).unwrap(), expected);
+    }
+
+    #[test]
     fn clamps_are_found_kept_and_skipped() {
         let clamp = |scratch, stride, records| {
             vec![
@@ -736,7 +805,7 @@ mod tests {
             [(5, 24, 0), (5, 1200, 256)]
         );
         assert_eq!(next, 256 + 1280);
-        let kept = keep_clamped(list.clone(), &found);
+        let kept = keep_clamped(list.clone(), &found).unwrap();
         assert_eq!(kept.len(), list.len() + 6);
         assert_eq!(
             kept[7],

@@ -270,25 +270,49 @@ fn learn(rip: usize, same: bool, can_look: bool) {
     if !same || !can_look || stayed != 256 || changed * 4 > stayed {
         return;
     }
-    let Some(file) = std::env::var_os("VICTORY_WRITE_SITES") else {
+    // (Nothing more once the file has been refused.)
+    if std::env::var_os("VICTORY_WRITE_SITES").is_none()
+        || SITES_FILE.get().is_some_and(Option::is_none)
+    {
         return;
-    };
+    }
     // (Not here, under a fault of the title's.)
     std::thread::spawn(move || {
+        let Some(file) = SITES_FILE
+            .get_or_init(|| outside_repo(std::env::var_os("VICTORY_WRITE_SITES")?.into()))
+        else {
+            return;
+        };
         let Some((image, offset)) = place(rip) else {
             return;
         };
         use std::io::Write;
         let line = format!("{image} {offset:x}\n");
-        let known = std::fs::read_to_string(&file).unwrap_or_default();
+        let known = std::fs::read_to_string(file).unwrap_or_default();
         if known.lines().any(|l| l.starts_with(line.trim_end())) {
             return;
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(&file) {
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(file) {
             let _ = file.write_all(line.as_bytes());
         }
         tracing::info!(image, offset = format_args!("{offset:#x}"), stayed, changed, "a write of the title's that mostly changes nothing, noted");
     });
+}
+
+/// The file `VICTORY_WRITE_SITES` names, once looked at: `None` if it may not
+/// be written.
+static SITES_FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+/// `file`, if it is outside every source tree: its lines are places in the
+/// title's code (docs/asset-policy.md). Said once if not.
+fn outside_repo(file: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    match victory_core::ensure_outside_repo(&file) {
+        Ok(()) => Some(file),
+        Err(error) => {
+            tracing::warn!(%error, "VICTORY_WRITE_SITES: not written");
+            None
+        }
+    }
 }
 
 /// The file name of the image `address` is in, and where in it.
@@ -413,5 +437,14 @@ mod tests {
         assert!(overlap(10 * B + 5, 10 * B + 900, 8), "in one block");
         assert!(!overlap(10 * B + 5, 12 * B, 8) && !overlap(10 * B, 9 * B, B));
         assert!(overlap(10 * B, 9 * B, B + 1));
+    }
+
+    #[test]
+    fn sites_are_not_written_into_the_source_tree() {
+        let inside = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("victory.txt");
+        assert_eq!(outside_repo(inside), None);
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("victory.txt");
+        assert_eq!(outside_repo(outside.clone()), Some(outside));
     }
 }

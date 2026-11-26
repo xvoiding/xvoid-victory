@@ -21,6 +21,7 @@ use windows::core::Interface;
 const SUBMITS: usize = 30;
 const CALLS: usize = 40_000;
 const VIEWS: u32 = 1_500_000;
+const PORTABLE_VIEWS: u32 = 1_000_000;
 
 fn buffer(device: &ID3D12Device, kind: u32, size: u64) -> (ID3D12Resource, *mut u8) {
     let (heap, state, flags) = match kind {
@@ -183,14 +184,18 @@ impl Big {
                     (a, l)
                 })
                 .collect();
-            let views: ID3D12DescriptorHeap = device
-                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+            let make_views = |count: u32| -> windows::core::Result<ID3D12DescriptorHeap> {
+                device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                    NumDescriptors: VIEWS,
+                    NumDescriptors: count,
                     Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                     NodeMask: 0,
                 })
-                .unwrap();
+            };
+            let (views, view_count) = match make_views(VIEWS) {
+                Ok(heap) => (heap, VIEWS),
+                Err(_) => (make_views(PORTABLE_VIEWS).unwrap(), PORTABLE_VIEWS),
+            };
             let step = device
                 .GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
                 as usize;
@@ -204,7 +209,7 @@ impl Big {
                     )
                 })
                 .collect();
-            for i in 0..VIEWS as usize {
+            for i in 0..view_count as usize {
                 let at = D3D12_CPU_DESCRIPTOR_HANDLE {
                     ptr: start + i * step,
                 };

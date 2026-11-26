@@ -15,6 +15,7 @@ mod host;
 mod image_watch;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub use victory_gpu::frame_phase;
+pub use victory_gpu::frames_begun;
 
 pub mod modules;
 mod registry;
@@ -28,6 +29,9 @@ pub use victory_gpu::replay;
 
 #[cfg(windows)]
 pub use victory_gpu::pipeline::known as known_pipelines;
+/// Renderer port #2's switch and marks, for the launcher.
+#[cfg(windows)]
+pub use victory_gpu::port_descriptors;
 
 use victory_loader::{ImportResolver, Provenance, Resolution};
 use victory_pe::ImportSymbol;

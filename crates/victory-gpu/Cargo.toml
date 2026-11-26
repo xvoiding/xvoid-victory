@@ -12,9 +12,10 @@ blake3.workspace = true
 zlib-rs.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+victory-core.workspace = true
 victory-formats.workspace = true
 victory-pipeline.workspace = true
-victory-shader.workspace = true
+victory-shader = { workspace = true, features = ["host"] }
 
 [build-dependencies]
 blake3.workspace = true
