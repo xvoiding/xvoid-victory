@@ -7,7 +7,8 @@
 # Your own dump of the title.     env: VICTORY_GAME_DIR
 game_dir = 'D:\victory-data\game'
 
-# Derived data. Default: %LOCALAPPDATA%\victory\cache.   env: VICTORY_CACHE_DIR
+# Derived data (translated shaders, pipelines made ahead). Put it on your fastest
+# drive and keep room for it. Default: %LOCALAPPDATA%\victory\cache.   env: VICTORY_CACHE_DIR
 # cache_dir = 'D:\victory-data\cache'
 
 # What titles save (persistent local storage), kept apart from the cache.

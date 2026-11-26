@@ -9,16 +9,21 @@ The 7900 XTX fork was tuned for **AMD RDNA 3 with 24 GB of video memory and 64 G
 of RAM**. This one is about getting the same layer to start and stay stable on
 **NVIDIA laptops with 8 GB of video memory and 32 GB of RAM** (the target is an
 RTX 4060 Laptop with an Intel i7), where the memory the title needs is the
-first wall. It is not there yet.
+first wall. The aim is steady frame times first and a higher number second. It
+is not there yet.
 
 ## Status of this fork
 
 Nothing has been measured on the target hardware yet. A first attempt on it, with
 launcher folders made separately from this fork, stayed under 5 fps; the suspected cause is memory
 (40-46 GB private against 32 GB of RAM, so Windows pages), not confirmed.
-What this fork adds so far is ways to ask for less memory, and notes on what to
-check: [docs/low-memory.md](docs/low-memory.md). The speed work underneath is the
-7900 XTX fork's, and its numbers below are its numbers, not this fork's.
+What this fork adds so far is ways to ask for less memory (`-LowMemory`), and an
+ordered checklist for steady frames on this hardware: the page file, which GPU
+Windows gives the title, a driver shader cache that keeps its pipelines,
+pipelines made before playing, and thread counts for fewer cores
+([docs/low-memory.md](docs/low-memory.md)). It also has a table for results, which
+is empty until someone measures. The speed work underneath is the 7900 XTX
+fork's, and its numbers below are its numbers, not this fork's.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
