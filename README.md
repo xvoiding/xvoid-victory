@@ -1,9 +1,19 @@
 # xvoid-victory
 
-A fork of [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX),
+A fork of [Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork) (the surviving
+copy of codec-d/cool_fox at `f4b48ad`, which took in work from
+[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)),
 itself a fork of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
 layer that runs an Xbox Series title natively on Windows from files the user
 supplies. It is made by xvoid with [Claude Code](https://claude.com/claude-code).
+Licence GPL-3.0-or-later, credits as in `LICENSE`; `docs/integration.md` is the
+cgbj fork's own account of what it took from where.
+
+The branch `cgbj-base` takes cgbj-fork's engine as it is on `main`
+(`2eb9b22`, 2026-11-26) and keeps this fork's launcher, scripts and policy checks
+on top. Its measurements were made on RTX cards (3080 Ti, 5090) with 32 GB of RAM;
+the numbers below under "Status of this fork" were taken **before** the change of
+engine and have not been repeated on it.
 
 The 7900 XTX fork was tuned for **AMD RDNA 3 with 24 GB of video memory and 64 GB
 of RAM**. This one is about getting the same layer to start and stay stable on
@@ -31,7 +41,8 @@ person's screenshots and logs, Series X profile, the 7900 XTX fork's code with t
 - The picture is **blurry** indoors; whether that is textures still streaming or a pass that is not running is not
   known yet.
 
-What this fork adds: the two-plane (scene and interface) blend so the HUD and menus show; `shaders` translating for
+What this fork adds (the two-plane scene-and-interface blend that an earlier build of this fork carried now comes from
+cgbj-fork's `compose.rs` instead): `shaders` translating for
 the host's wave size and view limit, so `scripts\prep.ps1` fills a cache the run can use; NVIDIA-safe defaults
 (`play.ps1`: ambient off, 4 list threads); ways to ask for less memory (`-LowMemory`); a paging-file script; and an
 ordered checklist for steady frames on this hardware ([docs/low-memory.md](docs/low-memory.md)). The speed work
