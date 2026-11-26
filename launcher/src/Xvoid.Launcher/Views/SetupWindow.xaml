@@ -74,7 +74,8 @@
                     </StackPanel>
 
                     <!-- 3: engine -->
-                    <StackPanel Visibility="{Binding IsStep3, Converter={StaticResource BoolToVis}}" DataContext="{Binding Engine}">
+                    <StackPanel Visibility="{Binding IsStep3, Converter={StaticResource BoolToVis}}">
+                      <StackPanel DataContext="{Binding Engine}">
                         <TextBlock Text="Engine" Style="{StaticResource Title}" />
                         <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}"
                                    Text="The launcher downloads the engine from the project's releases and checks its SHA-256 before unpacking. If you build it yourself, choose a local build on the Engine page." />
@@ -89,10 +90,12 @@
                                 </StackPanel>
                             </StackPanel>
                         </Border>
+                      </StackPanel>
                     </StackPanel>
 
                     <!-- 4: preset -->
-                    <StackPanel Visibility="{Binding IsStep4, Converter={StaticResource BoolToVis}}" DataContext="{Binding Settings}">
+                    <StackPanel Visibility="{Binding IsStep4, Converter={StaticResource BoolToVis}}">
+                      <StackPanel DataContext="{Binding Settings}">
                         <TextBlock Text="Preset" Style="{StaticResource Title}" />
                         <TextBlock Margin="0,12,0,16" Foreground="{StaticResource Dim}" Text="You can change this any time in Settings." />
                         <RadioButton Style="{StaticResource ChoiceCard}" GroupName="setupPreset" IsChecked="{Binding PresetAuto, Mode=TwoWay}">
@@ -109,6 +112,7 @@
                         </RadioButton>
                         <TextBlock Margin="0,12,0,0" Style="{StaticResource Caption}"
                                    Text="After this, open Prepare once: translating shaders ahead of time saves most of the first-run stutter." />
+                      </StackPanel>
                     </StackPanel>
                 </Grid>
 
