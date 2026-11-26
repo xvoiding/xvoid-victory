@@ -37,7 +37,7 @@
                         <TextBlock Text="{Binding Message}" VerticalAlignment="Center" />
                         <Button Grid.Column="1" Content="Stop" Style="{StaticResource SecondaryButton}" Command="{Binding CancelCommand}" Padding="14,6" />
                     </Grid>
-                    <ProgressBar Value="{Binding Progress}" Margin="0,14,0,0" Visibility="{Binding Indeterminate, Converter={StaticResource NotToVis}}" />
+                    <ProgressBar Value="{Binding Progress, Mode=OneWay}" Margin="0,14,0,0" Visibility="{Binding Indeterminate, Converter={StaticResource NotToVis}}" />
                     <Border Height="6" Margin="0,14,0,0" CornerRadius="3" Background="#1FFFFFFF" ClipToBounds="True"
                             Visibility="{Binding Indeterminate, Converter={StaticResource BoolToVis}}">
                         <Border Width="120" HorizontalAlignment="Left" CornerRadius="3" Background="{StaticResource AccentGradient}">
