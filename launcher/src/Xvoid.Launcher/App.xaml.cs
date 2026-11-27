@@ -169,9 +169,21 @@ public partial class App : Application
         Environment.Exit(1);
     }
 
+    // One error box at a time: an error that repeats (once per log line, say) is written to the crash log each time but
+    // shown once, instead of stacking a box for every repeat.
+    static bool _showing;
+
     static void Report(Exception ex)
     {
         var log = WriteCrashLog(ex);
+        if (_showing) return;
+        _showing = true;
+        try { Show(ex, log); }
+        finally { _showing = false; }
+    }
+
+    static void Show(Exception ex, string? log)
+    {
         var where = log is null ? "" : $"\n\nDetails: {log}";
         // WPF wraps most start-up failures in an XamlParseException whose message says nothing; the cause is underneath.
         var root = ex.GetBaseException();
