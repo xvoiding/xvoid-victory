@@ -32,14 +32,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked
       # Includes xtask's repository_passes_policy, the asset-policy check.
       #
-      # Four of the engine's tests check what Direct3D's software adapter (WARP) does: how ExecuteIndirect
-      # spends a budget, whether the depth-bounds test rejects a draw, and what size a buffer gets. Their result follows the WARP of
+      # Three of the engine's tests check what Direct3D's software adapter (WARP) does: how ExecuteIndirect
+      # spends a budget, and whether the depth-bounds test rejects a draw. Their result follows the WARP of
       # the Windows build they run on. On the runner's (Windows Server 2025) they fail, the others pass, and
-      # none of the four touches anything this repository changed. They are skipped here, by name, and
+      # none of the three touches anything this repository changed. They are skipped here, by name, and
       # stay in the tree; on the engine author's machine they are theirs to run.
       #
-      # descriptor::host::tests::views_off_their_elements_get_a_copy_of_their_bytes is the same kind, and
-      # came with the engine's update to df2daaf: it creates a buffer on the host adapter and compares
+      # A fourth of the same kind came with the engine's update to df2daaf,
+      # descriptor::host::tests::views_off_their_elements_get_a_copy_of_their_bytes: it creates a buffer on the host adapter and compares
       # the width the adapter gives it, which is 4194304 on the runner's WARP and 2048 in the test.
       #
       # watch::tests::a_block_just_written_rests is skipped too: it times real page-protection faults, and
