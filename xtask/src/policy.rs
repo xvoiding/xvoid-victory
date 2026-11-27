@@ -99,7 +99,7 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
     )
 }
 
-fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
+pub(crate) fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
     let git = |args: &[&str]| -> Result<Option<Vec<String>>> {
         let out = Command::new("git")
             .args(args)
