@@ -1,21 +1,23 @@
 # xvoid-victory
 
-A fork of [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)
-(branch `a-publier`, `4eb6cfd`, 2026-11-26), which follows
-[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) and
-carries its own AMD fixes and an FSR 4 port from DexNom/VIctory; all of it a fork
-of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
+A fork of [trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
+(`main`, `0cef07e`, 2026-11-27), the NVIDIA build of
+[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX), itself a
+fork of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
 layer that runs an Xbox Series title natively on Windows from files the user
 supplies. It is made by xvoid with [Claude Code](https://claude.com/claude-code).
 Licence GPL-3.0-or-later, credits as in `LICENSE`.
 
 This repository's runtime is that engine, taken as it is, with this fork's
 launcher, scripts and policy checks on top (`main` is the same tree as the branch
-`belobug-base`). Belobug's README says it was tested
-only on an AMD RX 9070 XT and is not playable yet; nothing here has been run on
-it. The sibling branch `cgbj-base` is the same launcher on
-[Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork), which was measured on
-RTX cards. The numbers under "Status of this fork" were taken on neither.
+`nvidia-base`). Its README says it was tested on one PC, a GeForce RTX 5070 with
+12 GB; nothing here has been run on it, least of all on an 8 GB card. The title's
+own **ray tracing is off** (the launcher says so outright, `VICTORY_BVH_BUILDER=0`;
+turning it on is slow and breaks the picture). The branches `belobug-base`
+(Belobug's AMD fork) and `cgbj-base`
+([Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork)) carry the same
+launcher on those engines. The numbers under "Status of this fork" were taken on
+none of them.
 
 The 7900 XTX fork was tuned for **AMD RDNA 3 with 24 GB of video memory and 64 GB
 of RAM**. This one is about getting the same layer to start and stay stable on

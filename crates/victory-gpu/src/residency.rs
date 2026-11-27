@@ -1,26 +1,9 @@
-//! Host-memory admission for speculative texture work and reusable upload storage.
-//!
-//! From codec-d/cool_fox (641835a4, fabb872a, c64fc9b4, 08e4574d, e94d277a; the
-//! values of the last). Only with `VICTORY_RESIDENCY=1` ([`on`]): the memory
-//! of the system is then asked once a second; below 3 GiB of free RAM or 4 GiB
-//! of commit (out again above 5 / 6) texture prefetch is limited to 64 MiB a
-//! frame and idle scratch and staging blocks are let go; below 1.5 GiB of
-//! commit to 16 MiB; the texture pass stops below 512 MiB of commit, new
-//! staging blocks for textures picked by index below 1 GiB. With 32 GiB of RAM
-//! or less (or `VICTORY_RESIDENCY_LIMITED=1`) the budgets of a smaller PC.
-//! Off, nothing here changes anything, except that for 500 ms after the card
-//! refused memory (E_OUTOFMEMORY) the texture pass stops ([`upload_refused`]).
+﻿//! Host-memory admission for speculative texture work and reusable upload storage.
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
 const MIB: u64 = 1 << 20;
-
-/// `VICTORY_RESIDENCY=1`: the memory budgets of this module (off by default).
-pub(crate) fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_RESIDENCY").is_some_and(|v| v == "1"))
-}
 const GIB: u64 = 1 << 30;
 static PRESSURED: AtomicBool = AtomicBool::new(false);
 static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -93,9 +76,6 @@ pub(crate) fn admit_texture_pass(bake: bool) -> bool {
     if now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) {
         return false;
     }
-    if !on() {
-        return true;
-    }
     has_upload_reserve(sample_commit(now), bake)
 }
 
@@ -103,9 +83,6 @@ pub(crate) fn admit_texture_pass(bake: bool) -> bool {
 /// (reusing existing free ranges in already-committed pool blocks stays open
 /// whenever `admit_texture_pass` is true).
 pub(crate) fn allow_staging_growth(bake: bool) -> bool {
-    if !on() {
-        return true;
-    }
     let now = crate::host::coarse_ms();
     if now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) {
         return false;
@@ -115,10 +92,7 @@ pub(crate) fn allow_staging_growth(bake: bool) -> bool {
 
 pub(crate) fn limited_host_ram() -> bool {
     static LIMITED: OnceLock<bool> = OnceLock::new();
-    *LIMITED.get_or_init(|| {
-        on() && (std::env::var_os("VICTORY_RESIDENCY_LIMITED").is_some_and(|v| v == "1")
-            || memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
-    })
+    *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
 }
 
 fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
@@ -131,9 +105,6 @@ fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
 
 /// Called by the once-per-second submission sweep. A failed sample keeps the last good state.
 pub(crate) fn refresh() {
-    if !on() {
-        return;
-    }
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
@@ -171,9 +142,6 @@ pub(crate) fn pressured() -> bool {
 /// True when OS commit headroom is critically low (< 1.5 GiB) or an allocation
 /// just failed with `E_OUTOFMEMORY`, requiring emergency throttling.
 pub(crate) fn critical_commit() -> bool {
-    if !on() {
-        return false;
-    }
     let now = crate::host::coarse_ms();
     now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) || sample_commit(now) < 1536 * MIB
 }

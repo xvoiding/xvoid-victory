@@ -31,7 +31,6 @@ extern "system" fn create_device(
 fn host_gpu_failed(what: &str) -> ! {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
     victory_loader::log_crash(&format!("VIctory: host GPU failure: {what}"));
-    victory_gpu::pipeline::known::flush_on_gpu_failure();
     const DXGI_ERROR_DEVICE_REMOVED: u32 = 0x887A_0005;
     // SAFETY: ends our own process.
     unsafe { TerminateProcess(GetCurrentProcess(), DXGI_ERROR_DEVICE_REMOVED) };
@@ -49,20 +48,6 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
     {
         let _ = container;
         Err("no host".into())
-    }
-}
-
-/// Of the cached translations met since the start: those an earlier build
-/// of the translator made, those translated again, and those that came out
-/// different (`victory_gpu::shader_cache`).
-pub fn stale_shaders() -> (u64, u64, u64) {
-    #[cfg(windows)]
-    {
-        victory_gpu::shader_cache::stale_counts()
-    }
-    #[cfg(not(windows))]
-    {
-        (0, 0, 0)
     }
 }
 

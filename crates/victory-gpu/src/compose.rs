@@ -1,9 +1,6 @@
-//! Two presented planes as one image: the console's display puts the second
+﻿//! Two presented planes as one image: the console's display puts the second
 //! (the interface) over the first (the scene), each scaled to the screen.
 //! Grand Theft Auto VI presents so on Series S.
-//!
-//! From the codec-d/cool_fox fork (641835a4, 581b0cb9). Only with
-//! `VICTORY_PLANES=1` ([`on`]); else the first plane is shown alone, as before.
 
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
@@ -33,15 +30,6 @@ float4 ps(V v) : SV_Target {
     return float4(saturate(o.rgb + s.rgb * (1 - saturate(o.a))), 1);
 }
 "#;
-
-/// Whether a second presented plane is composed over the first
-/// (`VICTORY_PLANES`; on by default, `0` turns it off). It acts only when
-/// the title presents a second plane (the Series S profile does; Series X
-/// presents one), so the default costs nothing elsewhere.
-pub(crate) fn on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_PLANES").is_none_or(|v| v != "0"))
-}
 
 pub(crate) struct Composer {
     root: ID3D12RootSignature,

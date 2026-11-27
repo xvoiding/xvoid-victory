@@ -194,8 +194,6 @@ struct Inner {
     kept: Vec<Vec<u64>>,
     /// It is among [`READY`] or being translated.
     scheduled: bool,
-    /// The title needs the open back list for a synchronous host API call.
-    waiting_for_back: bool,
     /// The list of ours (0: none yet).
     back: usize,
     /// That list was closed by the stream.
@@ -237,9 +235,6 @@ impl Recording {
                 let mut inner = held(&self.inner);
                 let Some(chunk) = inner.chunks.pop_front() else {
                     inner.scheduled = false;
-                    if inner.waiting_for_back {
-                        self.moved.notify_all();
-                    }
                     return;
                 };
                 if inner.back == 0 {
@@ -371,31 +366,6 @@ fn front<'a>(this: This) -> &'a mut Front {
     unsafe { &mut (*this.cast_mut().cast::<List>()).thin }
 }
 
-/// Lets a host API record at the current position of the title's open list.
-/// The caller is the sole writer of this list until its API call returns.
-/// Only preceding chunks of this recording have to finish translation.
-pub(crate) fn for_external(this: This) -> Option<This> {
-    if this.is_null() {
-        return None;
-    }
-    if super::host_list(this).is_some() {
-        return Some(this);
-    }
-    let front = front(this);
-    if front.closed {
-        return None;
-    }
-    front.hand_over();
-    let recording = front.recording.as_ref()?;
-    let mut inner = held(&recording.inner);
-    if inner.scheduled {
-        inner.waiting_for_back = true;
-        inner = recording.moved.wait_while(inner, |i| i.scheduled).unwrap_or_else(|e| e.into_inner());
-        inner.waiting_for_back = false;
-    }
-    (inner.back != 0).then_some(inner.back as This)
-}
-
 /// An argument as a word.
 trait Word: Copy {
     fn word(self) -> u64;
@@ -499,6 +469,22 @@ const TARGETS: u64 = after(13);
 const CLEAR_RTV: u64 = after(14);
 const CLEAR_DSV: u64 = after(15);
 const COPY_TEXTURE: u64 = after(16);
+/// Work of ours (`super::external`), boxed.
+const EXTERNAL: u64 = after(17);
+
+/// Writes down work of ours at this place of a title list's stream
+/// ([`super::external`]); gives it back if the list is not written down.
+pub(super) fn put_external(this: This, work: super::External) -> Result<(), super::External> {
+    if !wanted() || !on() {
+        return Err(work);
+    }
+    let front = front(this);
+    if front.closed || front.recording.is_none() {
+        return Err(work);
+    }
+    front.put(EXTERNAL, &[Box::into_raw(Box::new(work)) as u64]);
+    Ok(())
+}
 
 /// The bytes of `count` things at `items` (none if null).
 fn bytes_of<'a, T>(items: *const T, count: usize) -> &'a [u8] {
@@ -729,6 +715,15 @@ fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool)
             held(uploads).push(block);
             continue;
         }
+        if op == EXTERNAL {
+            // SAFETY: made by `put_external`, named once.
+            let work = *unsafe { Box::from_raw(w[0] as *mut super::External) };
+            // (A recording let go of drops it unrun.)
+            if !skip {
+                super::run_external(list, work);
+            }
+            continue;
+        }
         if skip && op != CLOSE && op != RESET {
             continue;
         }
@@ -929,6 +924,46 @@ mod tests {
         assert!(at::<u32>(&w[1..], 2, 0).is_null());
     }
 
+    /// Work of ours written down in a stream is taken out of it once: run
+    /// on the list the stream is translated on, or dropped unrun when the
+    /// recording was let go of (or there is no host list).
+    #[test]
+    fn external_work_is_taken_out_once() {
+        use std::sync::atomic::AtomicUsize;
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Relaxed);
+            }
+        }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let make = || -> super::super::External {
+            let guard = Counted(dropped.clone());
+            let ran = ran.clone();
+            Box::new(move |_| {
+                let _kept = &guard;
+                ran.fetch_add(1, Relaxed);
+                true
+            })
+        };
+        let mut f = Front::default();
+        f.recording = Some(Arc::new(Recording::new(0)));
+        f.put(EXTERNAL, &[Box::into_raw(Box::new(make())) as u64]);
+        f.put(Plain::TOPOLOGY as u64, &[4]);
+        f.put(EXTERNAL, &[Box::into_raw(Box::new(make())) as u64]);
+        let s = std::mem::take(&mut f.words);
+        let (calls, closed) = translate(std::ptr::null(), &s, || true);
+        assert_eq!((calls, closed), (3, false));
+        assert_eq!((ran.load(Relaxed), dropped.load(Relaxed)), (0, 2));
+        // Not let go of, but without a host list behind it: dropped unrun.
+        f.put(EXTERNAL, &[Box::into_raw(Box::new(make())) as u64]);
+        let s = std::mem::take(&mut f.words);
+        assert_eq!(translate(std::ptr::null(), &s, || false), (1, false));
+        assert_eq!((ran.load(Relaxed), dropped.load(Relaxed)), (0, 3));
+        f.recording = None;
+    }
+
     /// A view's record is the one at the call, also if its slot is written
     /// again right after.
     #[test]
@@ -936,7 +971,6 @@ mod tests {
         let mut slot = [0x5256_5476u64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let kept = record(slot.as_ptr() as u64);
         slot[1] = 99;
-        assert_eq!(slot[1], 99);
         assert_eq!(kept[1], 2);
         assert_eq!(record(0), [0; RECORD]);
     }

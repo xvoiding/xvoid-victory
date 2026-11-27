@@ -21,6 +21,16 @@ public class PlansTests
     }
 
     [Fact]
+    public void Ray_tracing_is_off_unless_asked_and_said_outright()
+    {
+        // Off by default, and "0" rather than nothing, so a stray VICTORY_BVH_BUILDER=1 in the user's own
+        // environment or an old settings file cannot turn it on behind the launcher's back.
+        Assert.Equal("0", Plans.Play(Configured(), Laptop(), Paths, "victory.exe").Environment["VICTORY_BVH_BUILDER"]);
+        var s = Configured(); s.RayTracing = true;
+        Assert.Equal("1", Plans.Play(s, Laptop(), Paths, "victory.exe").Environment["VICTORY_BVH_BUILDER"]);
+    }
+
+    [Fact]
     public void Ambient_light_is_only_on_when_asked()
     {
         var s = Configured(); s.AmbientLight = true;

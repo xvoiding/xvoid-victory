@@ -304,26 +304,6 @@ fn chosen(r: &wire::Resource, only: &[String]) -> bool {
     })
 }
 
-/// A command's category in a list of ours (one that runs no shader of the
-/// title's: the host's state preludes, its copies of what the CPU sent up,
-/// the card copies' passes), for the detailed timing's sums by owner.
-fn of_ours(category: &'static str) -> &'static str {
-    match category {
-        "barriers" => "barriers (lists of ours)",
-        "copies of buffers, PC to card" => "copies of buffers, PC to card (lists of ours)",
-        "copies of buffers, card to card" => "copies of buffers, card to card (lists of ours)",
-        "copies of buffers, card to PC" => "copies of buffers, card to PC (lists of ours)",
-        "copies of buffers, PC to PC" => "copies of buffers, PC to PC (lists of ours)",
-        "copies of textures, PC to card" => "copies of textures, PC to card (lists of ours)",
-        "copies of textures, card to card" => "copies of textures, card to card (lists of ours)",
-        "copies of textures, to the PC" => "copies of textures, to the PC (lists of ours)",
-        "copies of whole resources" => "copies of whole resources (lists of ours)",
-        "clears" => "clears (lists of ours)",
-        "resolves" => "resolves (lists of ours)",
-        other => other,
-    }
-}
-
 fn median(v: &[f64]) -> f64 {
     let mut v = v.to_vec();
     v.sort_by(f64::total_cmp);
@@ -808,13 +788,7 @@ impl Player {
                 let m = moves.entry(format!("{seen:?}")).or_insert((0u32, 0u64));
                 *m = (m.0 + 1, m.1 + r.desc.width);
             }
-            let mut desc = gpu::to_desc(&r.desc);
-            // Heaps are made without sharing across adapters (DROP), so a
-            // resource cannot ask for it: buffers placed in a heap the host
-            // opened from title memory (renderer port 1) have the flag, and
-            // were refused ("parameter incorrect"), and the frame's work on
-            // them read nothing, or hung the card.
-            desc.Flags &= !D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+            let desc = gpu::to_desc(&r.desc);
             let mut made: Option<ID3D12Resource> = None;
             let clear: Option<D3D12_CLEAR_VALUE> = r.clear.map(|c| {
                 // SAFETY: 20 bytes that were a clear value.
@@ -2202,7 +2176,7 @@ impl Player {
             for &l in s.lists.iter().filter(|&&l| l != MISSING) {
                 let cmds = self.commands[l as usize].clone();
                 let found = edit::find_clamps(&cmds, &psos, &mut next);
-                lists.push(edit::keep_clamped(cmds, &found)?);
+                lists.push(edit::keep_clamped(cmds, &found));
                 clamps.push(found);
             }
             submits.push(lists);
@@ -2476,18 +2450,6 @@ impl Player {
             .map(|s| s.id)
             .collect();
         let mut stamps = Vec::new();
-        // A list of ours: one that runs no shader but ours (the host's state
-        // preludes, copies of what the CPU sent up, the card copies' passes);
-        // its commands are summed apart from the title's lists' ones.
-        let ours = {
-            let mut bound = NONE;
-            !cmds.iter().any(|c| {
-                if let Cmd::Pipeline { pso } = c {
-                    bound = *pso;
-                }
-                c.runs_shaders() && !clamps.contains(&bound) && !compares.contains(&bound)
-            })
-        };
         let mut bound = NONE;
         // What the compute side has bound.
         let mut compute: Vec<Cmd> = Vec::new();
@@ -2563,7 +2525,6 @@ impl Player {
                     Cmd::Resolve { .. } | Cmd::ResolveRegion { .. } => "resolves",
                     _ => self.copy_kind(c),
                 };
-                let category = if ours { of_ours(category) } else { category };
                 let runs = match c {
                     c if c.runs_shaders() => bound,
                     // Copies to textures by what they go to.
@@ -3081,7 +3042,7 @@ impl Player {
                     continue;
                 }
                 for l in all {
-                    self.worker.queue.ExecuteCommandLists(std::slice::from_ref(l));
+                    self.worker.queue.ExecuteCommandLists(&[l.clone()]);
                     self.worker.idle()?;
                 }
             }

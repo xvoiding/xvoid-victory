@@ -1,9 +1,7 @@
 //! Diagnostics: where the submission copies of title memory go (which
 //! ranges, how often, of what memory) and what limits their rate, logged
 //! with the frame-rate line. `VICTORY_COPY_MODE=plain` copies without the
-//! mapped-page guard, `none` skips the copies (both for timing only). Set
-//! `VICTORY_MEMORY_CATEGORIES=1` for one extra periodic line that gathers the
-//! memory categories already counted here into one approximation.
+//! mapped-page guard, `none` skips the copies (both for timing only).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -216,50 +214,6 @@ static WAITS_BY_WORK: Mutex<Option<HashMap<String, (u64, u64)>>> = Mutex::new(No
 /// their microseconds, and the longest one's.
 static COMMANDS_BY_WORK: Mutex<Option<HashMap<String, (u64, u64, u64)>>> = Mutex::new(None);
 
-/// What a list of a submission is, for a timing run's sums by list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Timed {
-    /// A run's prelude: refreshes of the copies its commands read.
-    Prelude,
-    /// The title's list, the run of that place in the submission.
-    Title(usize),
-    /// Ours in front of the lists, the steps done on the card.
-    Steps,
-    /// The compare of copies in the card's memory, behind the lists.
-    Compare,
-    /// Another of ours (the timeline's stamps).
-    Other,
-}
-
-impl Timed {
-    fn index(self) -> usize {
-        match self {
-            Timed::Prelude => 0,
-            Timed::Title(_) => 1,
-            Timed::Steps => 2,
-            Timed::Compare => 3,
-            Timed::Other => 4,
-        }
-    }
-}
-
-/// With `VICTORY_GPU_TIMING`, per kind of list ([`Timed`]): lists, their
-/// microseconds from sending to the card's signal, and the microseconds of
-/// the commands noted in them; then the least time of any list (what a
-/// submission of nothing costs, about).
-static LISTS_TIMED: Mutex<([[u64; 3]; 5], u64)> = Mutex::new(([[0; 3]; 5], u64::MAX));
-
-/// A list of kind `kind` took `wall` microseconds from its sending to the
-/// card's signal, `noted` of them in its noted commands (timing run).
-pub(crate) fn list_took(kind: Timed, wall: u64, noted: u64) {
-    let mut t = LISTS_TIMED.lock().unwrap_or_else(|e| e.into_inner());
-    let e = &mut t.0[kind.index()];
-    e[0] += 1;
-    e[1] += wall;
-    e[2] += noted;
-    t.1 = t.1.min(wall);
-}
-
 /// A command took `ms` on the card (timing run). `op` is its note: the
 /// kind and size first, then the pipeline in brackets, then what it binds.
 pub(crate) fn command_took(op: &str, ms: f64) {
@@ -365,20 +319,6 @@ static OWN: [Bank<8>; BANKS] = [const { Bank([const { AtomicU64::new(0) }; 8]) }
 /// released by another leaves one set below zero: the sum is right).
 fn owned(i: usize) -> u64 {
     OWN.iter().fold(0u64, |sum, b| sum.wrapping_add(b.0[i].load(Relaxed)))
-}
-
-/// Formats already-collected byte counts for the optional category line.
-/// Values are not summed here: several categories overlap, so only the
-/// individual numbers are meaningful.
-fn category_text(fields: &[(&str, u64)]) -> String {
-    let mut out = String::new();
-    for (name, bytes) in fields {
-        if !out.is_empty() {
-            out.push_str(", ");
-        }
-        out.push_str(&format!("{name} {:.0} MB", *bytes as f64 / (1 << 20) as f64));
-    }
-    out
 }
 
 /// The class of [`OWN`] a block of `size` bytes counts in.
@@ -511,18 +451,8 @@ mod command_tests {
 
 #[cfg(test)]
 mod own_tests {
-    use super::{block_class, category_text, owned};
+    use super::{block_class, owned};
     use std::sync::atomic::Ordering::Relaxed;
-
-    #[test]
-    fn the_category_line_formats_megabytes() {
-        let fields = [("first", 1u64 << 20), ("zero", 0), ("last", 5u64 << 20)];
-        assert_eq!(
-            category_text(&fields),
-            "first 1 MB, zero 0 MB, last 5 MB"
-        );
-        assert_eq!(fields[0].0, "first");
-    }
 
     #[test]
     fn blocks_count_in_their_size_class() {
@@ -594,28 +524,12 @@ fn system_memory() -> (u64, u64) {
     (m.ullAvailPhys, m.ullAvailPageFile)
 }
 
-/// Every how many memory lines (one each 5 s) the address space is walked
-/// for the memory map line ([`log_memory_map`]): `VICTORY_MEMORY_MAP=<n>`,
-/// 60 if unset (about every 5 minutes; 6 before), `0` leaves the walk out.
-/// (This module is in diagnostics builds only.)
-///
-/// The walk asks Windows about every region, 250,000 of them in a street
-/// (0.9 s), and its questions hold the process's memory map: the submitting
-/// thread's write-watch askings and the title's faults wait meanwhile (run
-/// lane2-0: two askings of 11 and 13 ms, each ending with one of the walk's
-/// questions).
-fn memory_map() -> u64 {
-    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *EVERY.get_or_init(|| match std::env::var("VICTORY_MEMORY_MAP") {
-        Ok(v) => v.trim().parse().unwrap_or(60),
-        Err(_) => 60,
-    })
-}
-
-/// Whether to print the optional one-line category summary. Off by default.
-fn memory_categories() -> bool {
+/// Whether the address space is walked for the memory map line
+/// ([`log_memory_map`]). On by default (this module is in diagnostics
+/// builds only); `VICTORY_MEMORY_MAP=0` leaves the walk out.
+fn memory_map() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::switch::on("VICTORY_MEMORY_CATEGORIES"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_MAP").is_none_or(|v| v != "0"))
 }
 
 /// Asks which of the pages in `asked` (address, answer) are in physical
@@ -812,7 +726,6 @@ fn log_memory() {
     let (free, left) = system_memory();
     let copies = crate::shadow::memory();
     let staged = crate::texture::memory();
-    let pool = crate::pool::memory();
     let textures = [0, 1].map(|i| crate::resource::HOST_TEXTURES[i].load(Relaxed));
     let made: Vec<u64> = crate::host::MADE.iter().map(|m| m.load(Relaxed)).collect();
     let windows = crate::shadow::windows();
@@ -831,8 +744,7 @@ fn log_memory() {
     // sixth line; and what the shader table and the pipeline library keep.
     static LINES: AtomicU64 = AtomicU64::new(0);
     static WALKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let every = memory_map();
-    if every > 0 && LINES.fetch_add(1, Relaxed) % every == every - 1 && !WALKING.swap(true, Relaxed) {
+    if memory_map() && LINES.fetch_add(1, Relaxed) % 6 == 5 && !WALKING.swap(true, Relaxed) {
         let walk = std::thread::Builder::new().name("victory-memory-map".into()).spawn(|| {
             log_memory_map();
             WALKING.store(false, Relaxed);
@@ -877,7 +789,7 @@ fn log_memory() {
         mb(card[3]),
     );
     {
-        let [textures, staging] = pool;
+        let [textures, staging] = crate::pool::memory();
         tracing::info!("memory in blocks (VICTORY_TEXTURE_POOL=0 turns them off): {textures} MB of textures, {staging} MB of their staging buffers");
     }
     let targets = crate::resource::targets_census();
@@ -1018,41 +930,6 @@ fn log_memory() {
         mb(crate::shadow::window_cover()),
         lists[3],
     );
-    if memory_categories() {
-        let fields: &[(&str, u64)] = &[
-            ("working set", working),
-            ("private total", private),
-            ("free physical", free),
-            ("commit headroom", left),
-            ("host lists alive", alive[0]),
-            ("lists never reset", lists[3]),
-            ("list scratch live", alive[2]),
-            ("list scratch spare", alive[4]),
-            ("list other uploads", alive[7]),
-            ("private growth making lists", lists[2]),
-            ("title window copies", copies[1]),
-            ("window pages copied", window[0]),
-            ("window held by lists", window[4]),
-            ("window without a length", window[6]),
-            ("texture host copies", census[1]),
-            ("texture title-fill copies", census[5]),
-            ("texture pool", pool[0] << 20),
-            ("staging pool", pool[1] << 20),
-            ("live texture staging", staged[1]),
-            ("descriptor views", views[2]),
-            ("shader containers", kept[1]),
-            ("translations", kept[3]),
-            ("pipeline library file", kept[4]),
-            ("our rust heap", own[..4].iter().sum()),
-            ("made upload buffers so far", made[1]),
-            ("made shared buffers so far", made[3]),
-            ("made card buffers so far", made[5]),
-        ];
-        tracing::info!(
-            "memory by category (VICTORY_MEMORY_CATEGORIES=1, approximate and overlapping, not a sum): {}",
-            category_text(fields)
-        );
-    }
 }
 
 /// Microseconds since the first call.
@@ -1335,7 +1212,7 @@ pub(crate) fn log(frames: f64) {
     );
     tracing::info!(
         "waits for the write trackers' locks per frame, all threads (number, time): {}",
-        crate::watch::lock_waits(frames)
+        crate::watch::lock_waits(frames as f64)
     );
     let [copies, blocks, opened, stores, unknown, full, stayed, copied_same, records] =
         [0, 1, 2, 3, 4, 5, 6, 7, 8].map(|n| crate::titlewrite::DONE[n].load(std::sync::atomic::Ordering::Relaxed));
@@ -1431,39 +1308,6 @@ pub(crate) fn log(frames: f64) {
             what.chars().take(700).collect::<String>()
         );
     }
-    // The lists of a timing run by kind: the title's, what of their time
-    // their commands account for, and ours.
-    let (timed, least) = std::mem::replace(&mut *LISTS_TIMED.lock().unwrap_or_else(|e| e.into_inner()), ([[0; 3]; 5], u64::MAX));
-    if timed.iter().any(|t| t[0] > 0) {
-        let per = |us: u64| us as f64 / 1e3 / frames;
-        let n = |c: u64| c as f64 / frames;
-        let all: u64 = timed.iter().map(|t| t[1]).sum();
-        let lists: u64 = timed.iter().map(|t| t[0]).sum();
-        let [prelude, title, steps, compare, other] = timed;
-        tracing::info!(
-            "  the card's time by list (timing run), per frame, from sending to the signal: {:.1} ms in {:.0} lists; the \
-             title's {:.1} ms in {:.0} (their noted commands {:.1}, the rest {:.1}: what of ours is recorded among them, \
-             barriers, and the sending); preludes {:.1} ms in {:.0} (refreshes of copies); steps on the card {:.1} ms in \
-             {:.0}; compares of copies in the card's memory {:.1} ms in {:.0}; others of ours {:.1} ms in {:.0}; the least \
-             a list took {:.0} us ({:.1} ms a frame at that for every list)",
-            per(all),
-            n(lists),
-            per(title[1]),
-            n(title[0]),
-            per(title[2]),
-            per(title[1].saturating_sub(title[2])),
-            per(prelude[1]),
-            n(prelude[0]),
-            per(steps[1]),
-            n(steps[0]),
-            per(compare[1]),
-            n(compare[0]),
-            per(other[1]),
-            n(other[0]),
-            if least == u64::MAX { 0 } else { least },
-            if least == u64::MAX { 0.0 } else { per(least * lists) },
-        );
-    }
     let by = COMMANDS_BY_WORK.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut by: Vec<_> = by.into_iter().flatten().collect();
     by.sort_by_key(|&(_, (_, us, _))| std::cmp::Reverse(us));
@@ -1549,28 +1393,16 @@ pub(crate) fn log(frames: f64) {
         .collect();
     tracing::info!("  list calls by thread: {} threads; {}", recorders.len(), busiest.join(", "));
     log_memory();
-    #[cfg(feature = "diagnostics")]
-    crate::watch::alone_line(frames);
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
     ranges.sort_by_key(|&(_, (_, bytes, _, _))| std::cmp::Reverse(bytes));
-    // The kind of memory of each range, asked once per address: a question
-    // walks the page tables to the end of the pages alike, up to 10 ms in
-    // the title's heaps, and holds the memory map meanwhile (run lane2-0:
-    // 10 ms on the submitting thread, when this ran there). A line may name
-    // the kind an address had when first seen.
-    static KINDS: Mutex<Option<HashMap<usize, u32>>> = Mutex::new(None);
     for ((src, len), (n, bytes, us, _)) in ranges.into_iter().take(10) {
         use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
-        let known = KINDS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&src).copied();
-        let kind = known.unwrap_or_else(|| {
-            // SAFETY: plain data filled in by the query.
-            let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-            // SAFETY: a valid out pointer of the right size.
-            unsafe { VirtualQuery(src as *const _, &mut info, size_of_val(&info)) };
-            KINDS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(src, info.Type);
-            info.Type
-        });
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        unsafe { VirtualQuery(src as *const _, &mut info, size_of_val(&info)) };
+        let kind = info.Type;
         tracing::info!(
             "  copied from {src:#x}+{len:#x} (memory {kind:#x}): {:.1}x/frame, {:.2} MB/frame, {:.2} ms/frame",
             n as f64 / frames,

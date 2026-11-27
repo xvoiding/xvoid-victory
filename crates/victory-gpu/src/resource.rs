@@ -100,13 +100,7 @@ pub(crate) struct ResourceDesc {
 
 #[cfg(windows)]
 impl ResourceDesc {
-    /// Width, height, format and levels (`crate::texstore`).
-    pub(crate) fn shape(&self) -> [u32; 4] {
-        [self.width as u32, self.height, self.format, u32::from(self.mip_levels)]
-    }
-
     /// The texture of this one's levels from `base` on.
-    #[allow(clippy::wrong_self_convention)]
     fn from_level(&self, base: u32) -> ResourceDesc {
         let mut d = *self;
         if base > 0 {
@@ -632,6 +626,84 @@ pub(crate) fn family(format: u32) -> u32 {
 
 /// sRGB formats and their linear twins.
 pub(crate) const SRGB: [(u32, u32); 3] = [(29, 28), (91, 87), (93, 88)];
+
+/// Views made in another format than their typed host texture's, since the
+/// start ([`note_cast`]).
+pub(crate) static CAST_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Notes a `kind` of view ("render target", "shader resource", ...) whose
+/// title format `view` is not its typed host texture's `own`: D3D12 has
+/// such a view read or write in the texture's format (shader views are
+/// given it, `descriptor::host::fits`) or leaves it to the driver (render
+/// targets), so an sRGB view of UNORM memory loses its conversion - linear
+/// light stored in 8 bits without it keeps few steps in the dark. Each pair
+/// is said once, with what the host allows of format casts.
+/// shortcut: instrumentation for the posterised colours on NVIDIA
+/// (2026-11-26); typeless host textures and the same format pass silently.
+#[cfg(windows)]
+pub(crate) fn note_cast(kind: &'static str, own: u32, view: u32) {
+    if view == 0 || view == own || target_format(view) == own {
+        return;
+    }
+    let typeless = family(own) == own && family(own + 1) == own;
+    if typeless {
+        return;
+    }
+    CAST_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<(&'static str, u32, u32)>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.len() < 128 && seen.insert((kind, own, view)) {
+        let (fully_typed, relaxed) = casting_support();
+        tracing::info!(
+            kind,
+            texture_format = own,
+            view_format = view,
+            same_family = family(own) == family(view),
+            srgb_pair = SRGB.iter().any(|&(s, l)| (s == view && l == own) || (s == own && l == view)),
+            host_casts_fully_typed = fully_typed,
+            host_relaxed_casts = relaxed,
+            "a view in another format than its typed host texture"
+        );
+    }
+}
+
+/// Whether the host may view a typed texture in another format of its
+/// family (`CastingFullyTypedFormatSupported`), and in castable formats
+/// named at creation (`RelaxedFormatCastingSupported`).
+#[cfg(windows)]
+pub(crate) fn casting_support() -> (bool, bool) {
+    use windows::Win32::Graphics::Direct3D12::*;
+    static SUPPORT: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *SUPPORT.get_or_init(|| {
+        let Some(host) = crate::host::host() else {
+            return (false, false);
+        };
+        let mut o3 = D3D12_FEATURE_DATA_D3D12_OPTIONS3::default();
+        let mut o12 = D3D12_FEATURE_DATA_D3D12_OPTIONS12::default();
+        // SAFETY: feature structures of their sizes.
+        let (a, b) = unsafe {
+            (
+                host.device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS3,
+                    (&raw mut o3).cast(),
+                    size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS3>() as u32,
+                ),
+                host.device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS12,
+                    (&raw mut o12).cast(),
+                    size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS12>() as u32,
+                ),
+            )
+        };
+        let support = (
+            a.is_ok() && o3.CastingFullyTypedFormatSupported.as_bool(),
+            b.is_ok() && o12.RelaxedFormatCastingSupported.as_bool(),
+        );
+        tracing::info!(fully_typed = support.0, relaxed = support.1, "host format casting");
+        support
+    })
+}
 
 /// The format a view of a title texture must name when its host copy is
 /// typeless (see [`DEPTH_FORMATS`], [`SRGB`]): the title's own; `None` if
@@ -1185,11 +1257,6 @@ pub(crate) struct HostTexture {
     pub(crate) holds: std::sync::Arc<Holds>,
     /// Who makes its first upload (`crate::texture::ahead`).
     pub(crate) ahead: std::sync::atomic::AtomicU8,
-    /// Made whole from the store (`crate::texstore`): its levels below the
-    /// first one title memory holds, until a list copies them; then how
-    /// many levels the copy put in (its views show them).
-    pub(crate) prefill: std::sync::Mutex<Option<(u32, std::sync::Arc<Vec<u8>>)>>,
-    pub(crate) prefilled: std::sync::atomic::AtomicU32,
     /// The texture's flags (asked once: the runtime takes 100 ns to say, and
     /// every texture of every draw is asked about).
     flags: u32,
@@ -1276,62 +1343,12 @@ pub(crate) fn read_from(layout: &victory_formats::texture::Layout, first: u32) -
     if layout.bytes_from(first) < layout.size { first } else { 0 }
 }
 
-/// The share of the card's local VRAM budget in use, in percent (cached for
-/// a tenth of a second via [`crate::host::now_ms`]).
-#[cfg(windows)]
-fn video_memory_percent() -> u64 {
-    use std::sync::atomic::Ordering::Relaxed;
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tenth = crate::host::now_ms() / 100 + 1;
-    let last = LAST.load(Relaxed);
-    if last >> 8 == tenth {
-        return last & 0xff;
-    }
-    let pct = crate::host::host()
-        .and_then(|h| h.video_memory())
-        .and_then(|[budget, used, ..]| (budget > 0).then(|| ((u128::from(used) * 100) / u128::from(budget)).min(255) as u64))
-        .unwrap_or(0);
-    LAST.store((tenth << 8) | pct, Relaxed);
-    pct
-}
-
-/// How many of a streamed placed 2D texture's largest mips to skip so no side
-/// passes `VICTORY_TEXTURE_MAX` (0: uncapped; unset: 1024, then 512 from 92 %
-/// of the VRAM budget and 256 from 97 %, after `VIctory-vitesse` 7ada43b6).
-/// Keeps 16 GB cards from filling VRAM and stalling thousands of textures.
-#[cfg(windows)]
-fn over_cap(desc: &ResourceDesc) -> u32 {
-    static SET: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let set = *SET.get_or_init(|| {
-        std::env::var("VICTORY_TEXTURE_MAX")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-    });
-    if set == Some(0) {
-        return 0;
-    }
-    let max = set.unwrap_or_else(|| match video_memory_percent() {
-        0..92 => 1024,
-        92..97 => 512,
-        _ => 256,
-    });
-    let mut skip = 0u32;
-    while (desc.width >> skip) > max || (u64::from(desc.height) >> skip) > max {
-        if skip + 1 >= u32::from(desc.mip_levels) {
-            break;
-        }
-        skip += 1;
-    }
-    skip
-}
-
 /// The level a host copy begins at for views that start at `first`: one the
-/// host can have as a texture's level 0 ([`read_from`], [`over_cap`];
-/// block-compressed formats in whole blocks).
+/// host can have as a texture's level 0 ([`read_from`]; block-compressed
+/// formats in whole blocks).
 #[cfg(windows)]
 fn base_level(desc: &ResourceDesc, first: u32) -> u32 {
     const TEXTURE_2D: u32 = 3;
-    let first = first.max(over_cap(desc));
     if first == 0
         || !fills(desc)
         || desc.dimension != TEXTURE_2D
@@ -1389,31 +1406,6 @@ pub(crate) fn placed_bytes_from(desc: &[u32; 14], first: u32) -> Option<u64> {
 #[cfg(windows)]
 static REPLACED: std::sync::Mutex<Vec<(u64, Made)>> = std::sync::Mutex::new(Vec::new());
 
-/// The larger levels of placed texture `r`, first viewed from level
-/// `first`, if the store has them (`crate::texstore`): the level the title's
-/// memory is read from, and the levels below it as the host lays them out.
-#[cfg(windows)]
-fn stored_levels(r: &Resource, first: u32) -> Option<(u32, std::sync::Arc<Vec<u8>>)> {
-    if !crate::texstore::on() || r.desc.depth_or_array_size != 1 || r.desc.sample_count > 1 {
-        return None;
-    }
-    let t = texture_layout(&r.desc).filter(|t| t.planes.len() == 1)?;
-    let layout = &t.planes[0].layout;
-    if layout.desc.swizzle.xor() {
-        return None;
-    }
-    let level = read_from(layout, first);
-    let len = crate::texstore::key_levels(layout, u32::from(r.desc.mip_levels))
-        .into_iter()
-        .find(|&(k, _)| k == level)?
-        .1 as usize;
-    let mut smaller = vec![0u8; len];
-    if crate::host::read_there(r.data().cast_const(), &mut smaller) != len {
-        return None;
-    }
-    crate::texstore::find(r.desc.shape(), level, &smaller).map(|bytes| (level, bytes))
-}
-
 /// Since the start: host copies made with a first level other than the
 /// title's, and their bytes; host copies replaced by one with more levels;
 /// bytes of title memory such copies' textures take whole.
@@ -1433,9 +1425,6 @@ pub(crate) fn want_level(this: This, first: u32) {
     let r = resource(this);
     if r.desc.dimension == BUFFER || !r.host.placed.load(Relaxed) {
         return;
-    }
-    if r.desc.mip_levels > 1 {
-        crate::texlate::viewed(this as usize, first);
     }
     let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
     let Some((host, _)) = made.as_ref() else {
@@ -1567,6 +1556,55 @@ pub(crate) fn alias_of(this: This) -> Option<This> {
     same.then_some(other)
 }
 
+/// Says (once per kind of pair, at most 64 lines) that the texture the
+/// title placed at `address` ([`texture_at`]), `this`, lies inside the
+/// memory of a texture the host renders to or writes without starting
+/// where that texture starts. [`alias_of`] finds only a view at the very
+/// start; one placed further in (a level, a layer, a corner of an atlas) is
+/// filled from title memory, which the host's writes never reach: what
+/// lay there before (another texture's bytes) or zeros. Diagnostics for
+/// textures that read as noise or black where the title rendered them.
+#[cfg(windows)]
+fn placed_inside_target(address: u64, this: This) {
+    let hit = {
+        let targets = TARGETS_AT.lock().unwrap_or_else(|e| e.into_inner());
+        targets.range(..address).next_back().map(|(&start, &other)| (start, other))
+    };
+    let Some((start, other)) = hit else {
+        return;
+    };
+    let (r, o) = (resource(this), resource(other as This));
+    let Some(size) = footprint(&o.desc).map(|f| f.size) else {
+        return;
+    };
+    if address >= start.saturating_add(size) {
+        return;
+    }
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<[u32; 8]>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let pair = [
+        r.desc.width as u32,
+        r.desc.height,
+        r.desc.format,
+        u32::from(r.desc.mip_levels),
+        o.desc.width as u32,
+        o.desc.height,
+        o.desc.format,
+        u32::from(o.desc.mip_levels),
+    ];
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.len() < 64 && said.insert(pair) {
+        tracing::warn!(
+            view = ?this,
+            texture = ?other,
+            offset = format_args!("{:#x}", address - start),
+            target_bytes = size,
+            target_flags = format_args!("{:#x}", o.desc.flags),
+            "a placed texture lies inside the memory of a texture the host writes, not at its start: it is filled from title memory, which the host's writes never reach (width, height, format, levels of each): {pair:?}"
+        );
+    }
+}
+
 /// Whether host copies are made on first use. On by default;
 /// `VICTORY_LAZY_TEXTURES=0` makes each when the title creates its texture,
 /// as before.
@@ -1666,20 +1704,12 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         // The levels views show ([`held_only`]), those of the slots shaders
         // pick by index among them.
         let mut base = 0;
-        let mut prefill = None;
-        if texture.is_none() && shape_fits && r.host.placed.load(Relaxed) && held_only() && alias_of(this).is_none() {
+        if shape_fits && r.host.placed.load(Relaxed) && held_only() && alias_of(this).is_none() {
             let wanted = r.host.wanted.load(Relaxed);
             let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
             let first = wanted.min(viewed);
-            base = base_level(&r.desc, if first == u32::MAX { 0 } else { first });
-            // The store has its larger levels: made whole at once.
-            if over_cap(&r.desc) == 0
-                && base > 0
-                && tiled.is_none()
-                && let Some(found) = stored_levels(r, first)
-            {
-                base = 0;
-                prefill = Some(found);
+            if first != u32::MAX {
+                base = base_level(&r.desc, first);
             }
         }
         let texture = match texture {
@@ -1708,7 +1738,6 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             None => HostTexture::new(texture, state),
         };
         host.base = base;
-        *host.prefill.get_mut().unwrap_or_else(|e| e.into_inner()) = prefill;
         host.grown.store(r.host.grown.swap(false, Relaxed), Relaxed);
         if base > 0 {
             HELD[0].fetch_add(1, Relaxed);
@@ -1796,7 +1825,7 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // used.
         Some([budget, used, ..]) => {
             used.saturating_sub(crate::pool::texture_room()) + crate::shadow::card_room_kept() + targets_room_kept()
-                < budget / 100 * room_percent()
+                < room_line(budget)
         }
         None => filled < WITHOUT_BUDGET,
     }
@@ -1819,9 +1848,19 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
 /// 238), and the queue was refused from the first world frame on. With
 /// their room kept, the queue stops that much earlier while the world
 /// loads and gets it back as the targets are made.
+///
+/// Once the world's targets are made (half of the reserve or more) and
+/// have not grown by 64 MiB for `VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS`
+/// (20,000; 0: kept for the run, as before), nothing is kept: at 1440p the
+/// targets level off at 2.1-2.9 GB, and the rest of the 3,072 MB (990 MB
+/// at the first world frame, 160-640 MB in play) stayed reserved for
+/// targets that never came while thousands of textures waited for room
+/// (2026-11-26 diag run 16:28, 10:59:54: 8,722 MB in use + 836 MB kept
+/// for targets against a line of 9,527 MB). The reserve comes back when
+/// the targets grow by 64 MiB again (a new scene's), for as long again.
 #[cfg(windows)]
 pub(crate) fn targets_room_kept() -> u64 {
-    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| {
         std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
@@ -1829,9 +1868,76 @@ pub(crate) fn targets_room_kept() -> u64 {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map_or(3072 << 20, |mb| mb.min(8192) << 20)
     });
+    static SETTLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let settle = *SETTLE.get_or_init(|| {
+        std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(20_000)
+    });
     // Every host texture's bytes less those of the copies the title fills.
     let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
-    most.saturating_sub(targets)
+    // The targets' bytes at their last change of 64 MiB or more, and when
+    // they last grew by that much.
+    static GREW: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+    let now = crate::host::now_ms();
+    let (last, since) = (GREW[0].load(Relaxed), GREW[1].load(Relaxed));
+    let (last, since) = targets_seen(last, since, targets, now);
+    GREW[0].store(last, Relaxed);
+    GREW[1].store(since, Relaxed);
+    targets_kept(most, targets, now.saturating_sub(since), settle)
+}
+
+/// [`targets_room_kept`]'s record of the targets' bytes (`last`) and of
+/// when they last grew by 64 MiB (`since`, ms), with `targets` now: a fall
+/// of 64 MiB lowers the record (so that growing back counts as growth), a
+/// growth of 64 MiB raises it and restarts the clock.
+#[cfg(any(windows, test))]
+fn targets_seen(last: u64, since: u64, targets: u64, now: u64) -> (u64, u64) {
+    const STEP: u64 = 64 << 20;
+    if targets >= last.saturating_add(STEP) {
+        (targets, now)
+    } else if targets.saturating_add(STEP) <= last {
+        (targets, since)
+    } else {
+        (last, since)
+    }
+}
+
+/// What [`targets_room_kept`] keeps of `most`: what the targets do not
+/// hold yet, or nothing once they hold half of it or more and have not
+/// grown for `settle` ms (`still_ms`; `settle` 0: always kept).
+#[cfg(any(windows, test))]
+fn targets_kept(most: u64, targets: u64, still_ms: u64, settle: u64) -> u64 {
+    if settle > 0 && targets >= most / 2 && still_ms >= settle {
+        0
+    } else {
+        most.saturating_sub(targets)
+    }
+}
+
+/// What [`room`] weighs now, in MB, for the log: the card's budget, its
+/// use, the free part of the texture blocks, what is kept for card copies
+/// of title buffers and for render targets, and the line. `None` without
+/// the system's numbers, or under `VICTORY_TEXTURE_BUDGET_MB` (which
+/// weighs the textures' own bytes instead).
+#[cfg(windows)]
+pub(crate) fn room_terms(memory: Option<[u64; 4]>) -> Option<[u64; 6]> {
+    if std::env::var_os("VICTORY_TEXTURE_BUDGET_MB").is_some() {
+        return None;
+    }
+    let [budget, used, ..] = memory?;
+    Some(
+        [
+            budget,
+            used,
+            crate::pool::texture_room(),
+            crate::shadow::card_room_kept(),
+            targets_room_kept(),
+            room_line(budget),
+        ]
+        .map(|bytes| bytes >> 20),
+    )
 }
 
 /// [`room`] as it was at most a tenth of a second ago, for a question
@@ -1859,8 +1965,10 @@ pub(crate) fn room_lately() -> bool {
 /// textures wait (runs 170-174); the card copies of title buffers from
 /// 1 MiB up take 449 MB more of the card than before (941 against 492),
 /// and 94 gives the textures about that much back.
+///
+/// Unless that switch is set the line is [`line_for`] the budget instead.
 #[cfg(windows)]
-fn room_percent() -> u64 {
+pub(crate) fn room_percent() -> u64 {
     static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *PERCENT.get_or_init(|| {
         std::env::var("VICTORY_TEXTURE_ROOM_PERCENT")
@@ -1868,6 +1976,31 @@ fn room_percent() -> u64 {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map_or(90, |percent| percent.clamp(50, 97))
     })
+}
+
+/// The line [`room`] weighs the card's use against, in bytes of a budget
+/// of `budget`: `VICTORY_TEXTURE_ROOM_PERCENT`'s share of it if set, else
+/// [`line_for`] it.
+#[cfg(windows)]
+pub(crate) fn room_line(budget: u64) -> u64 {
+    static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *SET.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_ROOM_PERCENT").is_some()) {
+        budget / 100 * room_percent()
+    } else {
+        line_for(budget)
+    }
+}
+
+/// The budget less what is left free for the host's own needs that are
+/// made with no room test (render target bursts, buffer copies, upload
+/// buffers): 768 MiB or a twentieth of the budget, whichever is more; never
+/// under 90 % of it. A flat 90 % left 1,060 MB of a 10,600 MB budget unused
+/// while new textures waited (2026-11-26 16:52 run: "no room" at 9,526 to
+/// 9,881 MB weighed against 9,519 to 9,583); this gives about 290 MB of it
+/// to textures there, and keeps 90 % on cards of 7.5 GB or less.
+#[cfg(any(windows, test))]
+fn line_for(budget: u64) -> u64 {
+    budget.saturating_sub((768u64 << 20).max(budget / 20)).max(budget / 100 * 90)
 }
 
 /// For the card accounting line ([`card_accounting`]): the title texture
@@ -2138,7 +2271,7 @@ pub(crate) fn let_go_idle() {
             let used = used.saturating_sub(crate::pool::texture_room())
                 + crate::shadow::card_room_kept()
                 + targets_room_kept();
-            crate::host::vram_keep(budget, used)
+            crate::host::vram_keep_below(budget, used, room_line(budget))
         }
         _ => (crate::host::vram_idle_ms(memory), u64::MAX),
     };
@@ -2396,8 +2529,6 @@ impl HostTexture {
             grown: Default::default(),
             holds: Default::default(),
             ahead: crate::texture::ahead::fresh(),
-            prefill: Default::default(),
-            prefilled: Default::default(),
             flags,
         }
     }
@@ -2423,8 +2554,6 @@ impl HostTexture {
             grown: Default::default(),
             holds: Default::default(),
             ahead: crate::texture::ahead::fresh(),
-            prefill: Default::default(),
-            prefilled: Default::default(),
             flags,
         }
     }
@@ -2635,7 +2764,7 @@ fn host_texture_as(
         }
     };
     if let Err(e) = &made {
-        crate::residency::allocation_error(e);
+        crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");
     }
     if !reserved
@@ -2729,6 +2858,14 @@ pub(crate) fn texture_memory(this: This) -> Option<(*const u8, ResourceDesc)> {
     }
     let r = resource(this);
     (r.desc.dimension != BUFFER).then(|| (r.data().cast_const(), r.desc))
+}
+
+/// Whether resource `this` lies in memory the title mapped itself (made at
+/// an address): the only resource memory that can be unmapped while the
+/// resource lives. A committed resource's memory and a heap's are ours,
+/// allocated and zeroed whole when they were made.
+pub(crate) fn at_title_address(this: This) -> bool {
+    !this.is_null() && matches!(resource(this).backing, Backing::Address(_))
 }
 
 /// A buffer's host memory and size; `None` for textures.
@@ -2829,7 +2966,6 @@ impl Drop for Resource {
         if self.desc.dimension != BUFFER {
             let address = std::ptr::from_ref::<Resource>(self) as usize;
             crate::texback::released(address);
-            crate::texlate::gone(address);
             textures().remove(&address);
             if !fills(&self.desc) {
                 let mut targets = TARGETS_AT.lock().unwrap_or_else(|e| e.into_inner());
@@ -3058,7 +3194,6 @@ static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// See [`PLACED_TWINS`].
 #[cfg(windows)]
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -3186,6 +3321,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     }
     map.insert((address, *desc), out as usize);
     crate::texture::placed_in_host_written(address, desc);
+    placed_inside_target(address, out);
     resource(out)
         .host
         .placed
@@ -3476,6 +3612,30 @@ mod tests {
             S_OK
         );
         heap
+    }
+
+    /// Only a resource made at an address the title mapped can lose its
+    /// memory while it lives (`crate::texture::staged` asks only of those).
+    #[test]
+    fn only_resources_at_a_title_address_may_lose_their_memory() {
+        let null = std::ptr::null();
+        let committed = test_buffer(256);
+        assert!(!at_title_address(committed));
+        let heap = heap(KIB_64);
+        let mut placed = null;
+        assert_eq!(create_placed(null, heap, 0, &texture(64, 64, 28, 1), 0, null.cast(), &RESOURCE_IIDS[0], &mut placed), S_OK);
+        assert!(!at_title_address(placed));
+        let title = vec![0u8; KIB_64 as usize];
+        let mut at = null;
+        assert_eq!(
+            create_at_address(null, title.as_ptr() as u64, &texture(64, 64, 28, 1), 0, null.cast(), &RESOURCE_IIDS[0], &mut at),
+            S_OK
+        );
+        assert!(at_title_address(at));
+        assert!(!at_title_address(null));
+        for r in [committed, placed, at, heap] {
+            slot::<Release>(r, 0x10)(r);
+        }
     }
 
     #[test]
@@ -4648,6 +4808,45 @@ float4 lit() : SV_Target { return 1.0; }
         assert_eq!(texture_floor_bytes(Some(12 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(24 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(32 * GIB)), 2 * GIB);
+    }
+
+    /// The texture queue's line: the budget less 768 MiB or 5 %, never under
+    /// 90 % of it.
+    #[test]
+    fn room_line_follows_the_budget() {
+        const MIB: u64 = 1 << 20;
+        // 10,600 MB: 768 MiB free (92.8 %), not 1,060 MB.
+        assert_eq!(line_for(10_600 * MIB), 9_832 * MIB);
+        // 24 GB: 5 % free.
+        assert_eq!(line_for(24_000 * MIB), 22_800 * MIB);
+        // 6 GB: 90 % (768 MiB would be more than a tenth).
+        assert_eq!(line_for(6_000 * MIB), 6_000 * MIB / 100 * 90);
+        assert_eq!(line_for(0), 0);
+    }
+
+    /// The room kept for render targets goes once the world's targets are
+    /// made and have stopped growing, and comes back when they grow again.
+    #[test]
+    fn room_for_targets_is_given_up_once_they_settle() {
+        const MIB: u64 = 1 << 20;
+        let most = 3072 * MIB;
+        // Before the world: kept, however long.
+        assert_eq!(targets_kept(most, 652 * MIB, 60_000, 20_000), 2420 * MIB);
+        // The world's first frames: still growing.
+        assert_eq!(targets_kept(most, 2083 * MIB, 5_000, 20_000), 989 * MIB);
+        // Settled: nothing kept.
+        assert_eq!(targets_kept(most, 2432 * MIB, 20_000, 20_000), 0);
+        // `VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS=0`: kept as before.
+        assert_eq!(targets_kept(most, 2432 * MIB, 600_000, 0), 640 * MIB);
+
+        // Growth of 64 MiB restarts the clock; less does not.
+        assert_eq!(targets_seen(2000 * MIB, 1_000, 2050 * MIB, 9_000), (2000 * MIB, 1_000));
+        assert_eq!(targets_seen(2000 * MIB, 1_000, 2064 * MIB, 9_000), (2064 * MIB, 9_000));
+        // A fall lowers the record without restarting it, so growing back
+        // counts as growth.
+        let (last, since) = targets_seen(2400 * MIB, 1_000, 1000 * MIB, 9_000);
+        assert_eq!((last, since), (1000 * MIB, 1_000));
+        assert_eq!(targets_seen(last, since, 2400 * MIB, 30_000), (2400 * MIB, 30_000));
     }
 
     /// A placed texture viewed from a later level has a host copy of that

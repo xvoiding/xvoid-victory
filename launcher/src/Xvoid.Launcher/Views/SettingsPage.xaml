@@ -73,8 +73,8 @@
                     <Grid Margin="0,22,0,0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="Ray-traced light" FontWeight="SemiBold" />
-                            <TextBlock Text="The game's own indirect light. Lit interiors, about a third slower." Style="{StaticResource Caption}" />
+                            <TextBlock Text="Ray tracing (RTX)" FontWeight="SemiBold" />
+                            <TextBlock Text="The game's own ray tracing. Off, and best left off: on this engine it is slow and the picture breaks. An estimate stands in for the light." Style="{StaticResource Caption}" />
                         </StackPanel>
                         <CheckBox Grid.Column="1" Style="{StaticResource Switch}" IsChecked="{Binding RayTracing, Mode=TwoWay}" VerticalAlignment="Center" />
                     </Grid>

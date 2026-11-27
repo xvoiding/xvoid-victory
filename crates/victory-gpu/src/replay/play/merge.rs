@@ -277,7 +277,7 @@ impl Player {
             .map(|i| (all[i * 3 + 2], i))
             .filter(|w| w.0 > 0)
             .collect();
-        worst.sort_by_key(|a| std::cmp::Reverse(a.0));
+        worst.sort_by(|a, b| b.0.cmp(&a.0));
         for (n, i) in worst.into_iter().take(8) {
             let (id, at, len) = calls[i];
             out.push(format!(

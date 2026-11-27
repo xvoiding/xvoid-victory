@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -94,6 +94,9 @@ pub(crate) struct Shadow {
     /// Of a copy with two sides: only the dwords the title changed go up,
     /// as with [`send_changed`] ([`by_address`]).
     changes_only: std::sync::atomic::AtomicBool,
+    /// Whether its title memory is write-combined ([`Shadow::write_combined`]):
+    /// 0 not known yet, 1 no, 2 yes.
+    wc: AtomicU8,
     /// A window in card memory the CPU maps ([`window_mapped_for`]).
     mapped: bool,
     /// With `crate::inplace`: not a copy at all. `buffer` is placed in a
@@ -126,6 +129,9 @@ struct Card {
     sent: Mutex<SentRuns>,
     /// Whether something was put into `dirty` since it was last taken.
     touched: std::sync::atomic::AtomicBool,
+    /// The copy itself, set once it is in an `Arc` ([`carded`]): put on
+    /// [`TOUCHED`] when `touched` is set.
+    me: std::sync::OnceLock<std::sync::Weak<Shadow>>,
     /// The buffers' bytes (the title buffer's, rounded up to 64 KiB).
     size: u64,
 }
@@ -169,8 +175,16 @@ pub(crate) fn cards() -> bool {
 /// Default `(min_mb, max_mb)` for [`card_limits`] chosen from the adapter's
 /// local VRAM budget (`DXGI_QUERY_VIDEO_MEMORY_INFO.Budget`), in bytes.
 ///
-/// - Unknown (`None`, e.g. WARP) or `<= 12 GiB` (8–12 GB cards, whose WDDM
-///   budget is below 12 GiB): `(16, 512)` MiB, matching the 12 GB baseline.
+/// - Unknown (`None`, e.g. WARP): `(16, 512)` MiB.
+/// - `<= 12 GiB` (8–12 GB cards, whose WDDM budget is below 12 GiB): 16 MiB,
+///   and 18% of the budget between 512 and 2048 MiB. At 512 an RTX 4070
+///   SUPER (budget 11,229 MB) kept 592 MB of copies on the card and 5.7 GB in
+///   the PC's memory, which its shaders read over the bus: the opening
+///   cutscene's six heaviest compute passes took 42, 32, 27, 22, 19 and 19 ms
+///   and the card was 97% busy at 3 fps; at 2048 (1,979 MB on the card) the
+///   three heaviest took 0.19, 0.25 and 0.41 ms, all of the title's commands
+///   27-44 ms a frame, and the release build ran gameplay at 21-25 fps
+///   (2026-11-26, logs coolfox-20261126-134258 / -140021 / -140546).
 /// - `> 12 GiB` and `< 20 GiB` (16 GB cards, whose WDDM budget is typically
 ///   ~13.5–15.2 GiB): `(4, 2048)` MiB.
 /// - `>= 20 GiB` (24–32+ GB cards): `(1, (budget_mb / 4).min(8192))` MiB,
@@ -184,7 +198,7 @@ fn default_card_limits_mb(local_vram_budget: Option<u64>) -> (u64, u64) {
     const TWELVE_GIB_MB: u64 = 12 * 1024;
     const TWENTY_GIB_MB: u64 = 20 * 1024;
     if budget_mb <= TWELVE_GIB_MB {
-        (16, 512)
+        (16, (budget_mb * 18 / 100).clamp(512, 2048))
     } else if budget_mb < TWENTY_GIB_MB {
         (4, 2048)
     } else {
@@ -250,20 +264,6 @@ fn card_limits() -> (u64, u64) {
 /// Bytes alive of copies' card sides, and of their "before" twins.
 static CARD_BYTES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
-/// Bytes of title-memory-by-address (RT BVH) arenas placed in local VRAM.
-static BY_ADDRESS_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
-
-/// Local-VRAM buffer breakdown for the HUD: `[card_buffers_and_windows, bvh_arenas]`.
-pub(crate) fn vram_breakdown() -> [u64; 2] {
-    let bvh = BY_ADDRESS_CARD_BYTES.load(Ordering::Relaxed);
-    let win = WINDOW_CARD_BYTES.load(Ordering::Relaxed).saturating_sub(bvh);
-    let buf = CARD_BYTES[0].load(Ordering::Relaxed)
-        + CARD_BYTES[1].load(Ordering::Relaxed)
-        + win
-        + WINDOW_MAPPED_BYTES.load(Ordering::Relaxed);
-    [buf, bvh]
-}
-
 /// Whether the texture queue leaves room on the card for the card copies
 /// of title buffers that are not made yet
 /// (`VICTORY_CARD_ROOM_FOR_BUFFERS=1`; off by default).
@@ -323,13 +323,34 @@ pub(crate) fn card_room_kept() -> u64 {
 /// The copies in the card's memory.
 static CARDED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 
+/// The copies in the card's memory whose `touched` was set since
+/// [`card_dirty`] last took them (a copy may be on it twice). Before, each
+/// submission looked at every copy (some 3,900 in the first gameplay area,
+/// about 28 submissions a frame) to find the few dozen with changes.
+static TOUCHED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
+
+/// `shadow`, just made with a card side, is noted among the copies in the
+/// card's memory; the copies let go are dropped from the list once it has
+/// doubled since that was last done.
+fn carded(shadow: &Arc<Shadow>) {
+    static KEPT: AtomicUsize = AtomicUsize::new(0);
+    let Some(card) = &shadow.card else {
+        return;
+    };
+    let _ = card.me.set(Arc::downgrade(shadow));
+    let mut carded = CARDED.lock().unwrap_or_else(|e| e.into_inner());
+    carded.push(Arc::downgrade(shadow));
+    if carded.len() >= 2 * KEPT.load(Ordering::Relaxed).max(1024) {
+        carded.retain(|weak| weak.strong_count() > 0);
+        KEPT.store(carded.len(), Ordering::Relaxed);
+    }
+}
+
 /// Since the last frame line: bytes copied to card sides and the ranges
 /// they were; pieces compared on the card, pieces fetched and their
 /// bytes; the waits for the card the fetches added and their microseconds.
 pub(crate) static CARD_STATS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 
-/// Bytes of buffer copies in the card's memory and in windows (for the
-/// memory pressure log, [`crate::residency`]).
 pub(crate) fn live_span_bytes() -> u64 {
     CARD_BYTES[0].load(Ordering::Relaxed)
         + WINDOW_CARD_BYTES.load(Ordering::Relaxed)
@@ -467,11 +488,30 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
 /// card later windows stay where they are. The CPU's side stays in the PC's
 /// memory, so the memory shared with the card does not shrink by this
 /// alone; what moves is what shaders read.
+///
+/// Unset, it follows the card's budget ([`default_window_card_mb`]).
 fn window_card_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MOST.get_or_init(|| {
-        std::env::var("VICTORY_CARD_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) << 20
+        let asked = std::env::var("VICTORY_CARD_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok());
+        let budget = || crate::host::host().and_then(|h| h.video_memory()).map(|[budget, ..]| budget);
+        let mb = asked.unwrap_or_else(|| default_window_card_mb(budget()));
+        tracing::info!(window_card_mb = mb, asked = asked.is_some(), "card room for windows");
+        mb << 20
     })
+}
+
+/// The default of [`window_card_most`], in MiB, from the card's budget in
+/// bytes: none when it is not known; 9% of it, at most 1024 MiB, from 8 GiB
+/// on. 1024 on an RTX 4070 SUPER (budget 11,229 MB), with the copies of title
+/// buffers at 2048 ([`default_card_limits_mb`]), moved the reads of the
+/// title's allocator off the bus: the release build's gameplay went from
+/// 3 to 21-25 fps (2026-11-26, log coolfox-20261126-140546).
+fn default_window_card_mb(local_vram_budget: Option<u64>) -> u64 {
+    match local_vram_budget.map(|b| b >> 20) {
+        Some(mb) if mb >= 8 * 1024 => (mb * 9 / 100).min(1024),
+        _ => 0,
+    }
 }
 
 /// Bytes alive of windows' card sides ([`window_card_most`]).
@@ -632,12 +672,14 @@ impl SentRuns {
 /// ([`Shadow::card_merge_relay`]). Notes of sends that every fetch still to
 /// be merged came after are dropped.
 pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)> {
-    let mut out = Vec::new();
-    let mut carded = CARDED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<(Arc<Shadow>, Vec<(usize, usize)>)> = Vec::new();
+    let mut touched = std::mem::take(&mut *TOUCHED.lock().unwrap_or_else(|e| e.into_inner()));
+    touched.sort_unstable_by_key(|weak| weak.as_ptr() as usize);
+    touched.dedup_by(|a, b| a.ptr_eq(b));
     let fetched = RELAY_FETCHED.load(Ordering::Acquire);
-    carded.retain(|weak| {
+    for weak in touched {
         let Some(shadow) = weak.upgrade() else {
-            return false;
+            continue;
         };
         let ranges = shadow
             .card
@@ -657,8 +699,7 @@ pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)
         if !ranges.is_empty() {
             out.push((shadow, ranges));
         }
-        true
-    });
+    }
     out
 }
 
@@ -1521,8 +1562,10 @@ fn workers() -> &'static Workers {
         for i in 0..wide_threads() {
             let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
                 crate::cores::keep_helper_on_fast_cores("victory-wide");
+                let mut priority = crate::cores::Priority::new();
                 let workers = WORKERS.get().expect("made above");
                 loop {
+                    priority.keep();
                     let job = {
                         // A little while awake first: the next work comes
                         // within microseconds more often than not.
@@ -1556,6 +1599,12 @@ fn wide(jobs: Vec<Job>) {
     }
     let workers = workers();
     let _wide = crate::timeline::span("work spread over threads");
+    // Helpers woken: one for each job beyond the one this thread takes
+    // first, at most all of them. All were woken for every call (4 for 2
+    // jobs), and those that found nothing went back to sleep; a helper busy
+    // meanwhile looks at the queue before it sleeps again, and this thread
+    // takes what nobody took.
+    let wake = (jobs.len() - 1).min(wide_threads());
     let left = Arc::new((Mutex::new(jobs.len()), std::sync::Condvar::new()));
     {
         let mut queue = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
@@ -1572,7 +1621,11 @@ fn wide(jobs: Vec<Job>) {
             }));
         }
     }
-    workers.more.notify_all();
+    if wake >= wide_threads() {
+        workers.more.notify_all();
+    } else {
+        (0..wake).for_each(|_| workers.more.notify_one());
+    }
     loop {
         let job = workers.jobs.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
         match job {
@@ -1987,36 +2040,9 @@ pub(crate) fn stale_why() -> &'static str {
     WHY[STALE_WHY.load(Ordering::Relaxed).min(3)]
 }
 
-/// Since the last frame-rate line, where [`Shadow::merge_under_writes`]'s
-/// time went, in ns: 0 asking which pages were written, 1 finding the
-/// stale ones, 2 waiting for the locks, 3 the pages compared (the wall
-/// time), 4 noting the runs; summed over threads: 5 reading title memory,
-/// 6 comparing and putting in. Then 7 (unused), 8 stale pages, 9 calls.
-pub(crate) static UNDER_NS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
-
-fn under_ns(i: usize, since: std::time::Instant) -> std::time::Instant {
-    let now = std::time::Instant::now();
-    UNDER_NS[i].fetch_add((now - since).as_nanos() as u64, Ordering::Relaxed);
-    now
-}
-
-/// [`UNDER_NS`], taken.
-pub(crate) fn under_stats() -> [u64; 10] {
-    std::array::from_fn(|i| UNDER_NS[i].swap(0, Ordering::Relaxed))
-}
-
 /// [`MERGED`], taken.
 pub(crate) fn merged_stats() -> [u64; 3] {
     [0, 1, 2].map(|i| MERGED[i].swap(0, Ordering::Relaxed))
-}
-
-/// Adds the time since it was made to [`UNDER_NS`]`[6]` when dropped.
-struct Compared(std::time::Instant);
-
-impl Drop for Compared {
-    fn drop(&mut self) {
-        under_ns(6, self.0);
-    }
 }
 
 /// The runs of bytes where `now` differs from `was` (of one length), as
@@ -2072,6 +2098,137 @@ fn land_echo() -> bool {
 /// Since the last frame-rate line: bytes found to be a landing's alone, and
 /// bytes a landing was noted in that were the title's too.
 pub(crate) static ECHO: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Title memory the title asked for write-combined (the console's 0x400
+/// protection bit), as `[start, end)` ([`title_memory_write_combined`]).
+static WRITE_COMBINED: RwLock<Vec<(u64, u64)>> = RwLock::new(Vec::new());
+
+/// The title asked for `[at, at + len)` write-combined: its CPU writes the
+/// memory and does not read it (reads of such memory are uncached on the
+/// console, the GDK's read-back memory is cacheable).
+pub fn title_memory_write_combined(at: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let mut all = WRITE_COMBINED.write().unwrap_or_else(|e| e.into_inner());
+    all.push((at as u64, (at + len) as u64));
+}
+
+/// The title let go of `[at, at + len)` (`len` 0: of the allocation at `at`):
+/// write-combined regions in it are forgotten.
+pub(crate) fn write_combined_freed(at: usize, len: usize) {
+    let (at, end) = (at as u64, at.saturating_add(len) as u64);
+    let mut all = WRITE_COMBINED.write().unwrap_or_else(|e| e.into_inner());
+    all.retain(|&(from, to)| {
+        if len == 0 {
+            from != at
+        } else {
+            to <= at || from >= end
+        }
+    });
+}
+
+/// Whether all of `[start, start + len)` lies in write-combined title memory
+/// (in one region the title asked for so: regions are hundreds of MB to GB).
+fn is_write_combined(start: u64, len: u64) -> bool {
+    let all = WRITE_COMBINED.read().unwrap_or_else(|e| e.into_inner());
+    all.iter()
+        .any(|&(from, to)| from <= start && start + len <= to)
+}
+
+/// Whether what shaders write into copies in the card's memory of
+/// write-combined title memory stays on the card and is not compared,
+/// fetched and merged into title memory (`VICTORY_WC_NO_BACK=1`; off by
+/// default: an experiment).
+///
+/// The write-back of shader writes (`Shadow::gpu_writes`: hashes after
+/// sends, compare passes after the lists, fetches of the pieces that differ
+/// and their merge into title memory) keeps title memory the newest for the
+/// title's CPU. Of what the gameplay frame compared (log
+/// coolfox-20261126-184458), seven of the eight largest ranges, about 360 of
+/// 730 MB a frame, lie in the title's write-combined memory (protection
+/// 0x2404: 2.2 and 3.2 GB), and 36 MB a frame of it came back.
+///
+/// What it risks, and why it may hold:
+/// - The title's CPU reading what shaders wrote there reads older bytes.
+///   Write-combined memory is what the CPU writes and the GPU reads; read
+///   back it is uncached on the console too, and results the CPU reads go
+///   to cacheable memory.
+/// - A page the CPU writes goes up whole from title memory (as before) and
+///   so takes back what shaders wrote in the same 4 KiB page since: mixed
+///   pages lose the shaders' bytes (with the write-back they were in title
+///   memory). Not the dwords alone (`send_changed`): the title writing a
+///   value it wrote before (a counter set to 0 again) would not go up.
+/// - Another host copy of the same bytes (a texture placed there) does not
+///   see what shaders wrote through title memory.
+fn wc_no_back() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WC_NO_BACK").is_some_and(|v| v == "1"))
+}
+
+/// The smallest copy whose shader writes [`wc_no_back`] leaves on the card,
+/// in bytes (`VICTORY_WC_NO_BACK_MIN_KB`, 0 unset: all). With every copy
+/// left, the 4070 SUPER's cutscenes went near black (run xd-wcnoback,
+/// 2026-11-26: small results the title reads back, such as exposure, came
+/// back stale) while most of the saving is in a few ranges of hundreds of MB.
+fn wc_no_back_min() -> u64 {
+    static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("VICTORY_WC_NO_BACK_MIN_KB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) * 1024
+    })
+}
+
+/// Bytes shaders were declared to write in write-combined copies and that
+/// were left on the card ([`wc_no_back`]), since the last frame-rate line.
+pub(crate) static WC_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a title buffer in write-combined memory gets one copy, in card
+/// memory the CPU maps (`D3D12_HEAP_TYPE_GPU_UPLOAD`: a resizable BAR, this
+/// PC's 4070 SUPER has a 16 GiB one) instead of two sides
+/// (`VICTORY_WC_BAR=1`; off by default: an experiment).
+///
+/// Refreshes write title memory into the mapping through the bus (as they
+/// write a CPU's side now); shaders read and write the card's memory; there
+/// is no CPU's side, no send of what changed (a copy on the card before each
+/// submission), no hashes and no compare, and what shaders write stays
+/// there as with [`wc_no_back`], whose risks it takes: the CPU reading the
+/// mapping would cross the bus a few bytes at a time, so nothing of ours
+/// reads it for shader writes. A refresh writes whole pages, so a page the
+/// title writes takes back what shaders wrote in it.
+///
+/// What it costs: the same card memory as the card's side of a copy with
+/// two sides, counted with them ([`card_limits`]) and made only while a
+/// fifth of the budget is free; the PC's memory of the CPU's side is saved.
+/// Copies already made, or turned down for room, keep their two sides or
+/// stay in the PC's memory.
+fn wc_bar() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WC_BAR").is_some_and(|v| v == "1"))
+}
+
+/// A buffer of `size` bytes in card memory the CPU maps, for [`wc_bar`],
+/// counted with the card sides of copies ([`card_limits`]).
+fn wc_mapped_for(size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+    let (_, most) = card_limits();
+    if size >= 1 << 30 {
+        return None;
+    }
+    let host = host()?;
+    if let Some([budget, used, ..]) = host.video_memory()
+        && used + size > budget / 10 * 8
+    {
+        return None;
+    }
+    if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > most {
+        CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
+        return None;
+    }
+    let made = host.mapped_card_buffer(size, true);
+    if made.is_none() {
+        CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
+    }
+    made
+}
 
 /// Whether a refresh of a copy in the card's memory takes, and sends up,
 /// the dwords that title memory changed and no others
@@ -2158,7 +2315,7 @@ fn dword_runs(at: usize, title: &[u8], merged: &[u8], gap: usize) -> Vec<(usize,
 /// 12 MB this way and finds 80,000 runs.
 fn word_runs(at: usize, title: &[u8], held: &[u8]) -> Vec<(usize, usize)> {
     #[cfg(target_arch = "x86_64")]
-    if at.is_multiple_of(4) && title.len().is_multiple_of(4) && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
+    if at % 4 == 0 && title.len() % 4 == 0 && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the processor has AVX2, and the lengths are the same.
         return unsafe { word_runs_avx2(title, held) };
     }
@@ -2203,82 +2360,6 @@ unsafe fn word_runs_avx2(title: &[u8], held: &[u8]) -> Vec<(usize, usize)> {
     }
     while i + 4 <= n {
         if title[i..i + 4] != held[i..i + 4] {
-            push(i, 4);
-        }
-        i += 4;
-    }
-    runs
-}
-
-/// Whether [`Shadow::merge_under_writes`] puts the title's bytes into the
-/// CPU's side of a copy in the card's memory as it compares, a block of 32
-/// bytes where one of its words differs (`VICTORY_UNDER_FUSED=0`: the runs
-/// are found first and copied one by one afterwards, as before). The same
-/// bytes end up there: the words of a block that do not differ are equal.
-/// In session play-1125-1724 a frame had 190,000 runs in 400 pages, each
-/// a copy of a few bytes of its own.
-fn under_fused() -> bool {
-    crate::toggled!("VICTORY_UNDER_FUSED")
-}
-
-/// [`word_runs`], and every 32-byte block of `held` in which a word differs
-/// takes `title`'s bytes (the words of the tail that differ, one by one):
-/// `held` is `title` afterwards.
-fn word_runs_put(at: usize, title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
-    #[cfg(target_arch = "x86_64")]
-    if at.is_multiple_of(4) && title.len().is_multiple_of(4) && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: the processor has AVX2, and the lengths are the same.
-        return unsafe { word_runs_put_avx2(title, held) };
-    }
-    let runs = dword_runs(at, title, held, 0);
-    for &(r, m) in &runs {
-        held[r..r + m].copy_from_slice(&title[r..r + m]);
-    }
-    runs
-}
-
-/// # Safety
-/// AVX2, and two slices of one length, whole words.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn word_runs_put_avx2(title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
-    use std::arch::x86_64::*;
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    let mut push = |from: usize, len: usize| match runs.last_mut() {
-        Some((a, n)) if *a + *n == from => *n += len,
-        _ => runs.push((from, len)),
-    };
-    let n = title.len();
-    let mut i = 0;
-    while i + 256 <= n {
-        let mut differ = 0u64;
-        for k in 0..8 {
-            let at = i + 32 * k;
-            // SAFETY: inside both slices (`i + 256 <= n`).
-            unsafe {
-                let now = _mm256_loadu_si256(title.as_ptr().add(at).cast());
-                let old = _mm256_loadu_si256(held.as_ptr().add(at).cast());
-                let block = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(now, old))) as u8;
-                if block != 0 {
-                    _mm256_storeu_si256(held.as_mut_ptr().add(at).cast(), now);
-                }
-                differ |= u64::from(block) << (8 * k);
-            }
-        }
-        while differ != 0 {
-            let first = differ.trailing_zeros();
-            let count = (differ >> first).trailing_ones();
-            push(i + 4 * first as usize, 4 * count as usize);
-            if first + count >= 64 {
-                break;
-            }
-            differ &= u64::MAX << (first + count);
-        }
-        i += 256;
-    }
-    while i + 4 <= n {
-        if title[i..i + 4] != held[i..i + 4] {
-            held[i..i + 4].copy_from_slice(&title[i..i + 4]);
             push(i, 4);
         }
         i += 4;
@@ -2373,7 +2454,7 @@ pub(crate) fn land_as_before(start: usize, now: usize, held: usize, n: usize, ti
 
 #[cfg(test)]
 mod merge_tests {
-    use super::{PAGE, PIECE, back_piece, changed_runs, dword_runs, put_changed, word_runs, word_runs_put};
+    use super::{PIECE, back_piece, changed_runs, dword_runs, put_changed, word_runs};
 
     /// A piece put back takes the GPU's bytes where the copy changed and
     /// the title's everywhere else, reads and writes title memory only from
@@ -2545,39 +2626,6 @@ mod merge_tests {
     }
 
     #[test]
-    fn word_runs_put_finds_the_word_runs_and_puts_the_title_in() {
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        for round in 0..300 {
-            let n = [PAGE, 4096, 256, 260, 4, 0, 1000][round % 7];
-            let held: Vec<u8> = (0..n).map(|_| next() as u8).collect();
-            let mut title = held.clone();
-            // Sparse words, dense stretches, single bytes of words.
-            let changes = (next() % 600) as usize;
-            for _ in 0..changes.min(n) {
-                let at = (next() as usize) % n.max(1);
-                let len = [1, 3, 4, 40, 300][(next() % 5) as usize].min(n - at);
-                for b in &mut title[at..at + len] {
-                    *b = b.wrapping_add(1 + (next() % 255) as u8);
-                }
-            }
-            let want = word_runs(0, &title, &held);
-            let mut merged = held.clone();
-            let runs = word_runs_put(0, &title, &mut merged);
-            assert_eq!(runs, want, "round {round}");
-            assert_eq!(merged, title, "round {round}");
-            // At most this many runs of more than 256 bytes (the page's
-            // copies of their own, `merge_page_under_writes`).
-            assert!(runs.iter().filter(|r| r.1 > 256).count() <= n / 260 + 1, "round {round}");
-        }
-    }
-
-    #[test]
     fn word_runs_are_the_dword_runs() {
         let mut seed = 7u32;
         let mut random = move || {
@@ -2644,8 +2692,11 @@ impl Drop for Shadow {
             KEPT_BYTES.fetch_sub(self.len, Ordering::Relaxed);
         }
         let window = self.window;
-        if self.mapped {
+        if self.mapped && window {
             WINDOW_MAPPED_BYTES.fetch_sub(self.len, Ordering::Relaxed);
+        } else if self.mapped {
+            // A write-combined buffer's (`wc_bar`), counted with card sides.
+            CARD_BYTES[0].fetch_sub(self.width(), Ordering::Relaxed);
         }
         if let Some(card) = &mut self.card {
             if window {
@@ -2946,49 +2997,6 @@ pub(crate) fn window_use() -> [u64; 8] {
     out
 }
 
-/// Optional byte cap for loose title-window copies, in MiB. Unset or `0`
-/// keeps today's sweep. A positive value caps the copies only in the Watch
-/// and High RAM bands; Calm is unchanged.
-fn window_budget() -> Option<u64> {
-    static MB: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    *MB.get_or_init(|| {
-        std::env::var("VICTORY_WINDOW_BUDGET_MB")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|&v| v > 0)
-            .map(|v| v.saturating_mul(1 << 20))
-    })
-}
-
-/// Oldest eligible copies to remove until their unique bytes fit `keep`.
-/// Entries are `(last-used moment, bytes, unique copy identity)`, already
-/// sorted oldest first; one copy standing under several keys counts once.
-fn window_victims(entries: &[(u64, u64, usize)], keep: u64) -> Vec<usize> {
-    let mut left = 0u64;
-    let mut seen = std::collections::HashSet::new();
-    for &(_, bytes, id) in entries {
-        if seen.insert(id) {
-            left = left.saturating_add(bytes);
-        }
-    }
-    let mut out = Vec::new();
-    for (i, &(_, bytes, id)) in entries.iter().enumerate() {
-        if left <= keep {
-            break;
-        }
-        if seen.remove(&id) {
-            left = left.saturating_sub(bytes);
-            out.push(i);
-        }
-    }
-    out
-}
-
-/// Kept between sweeps so one sample near a watermark does not toggle the
-/// policy on the next submission.
-static WINDOW_BAND: std::sync::Mutex<crate::host::RamBand> =
-    std::sync::Mutex::new(crate::host::RamBand::Calm);
-
 /// Lets go of the copies of windows outside buffers that nothing names any
 /// more. They were never freed, and the world's streaming keeps asking for
 /// new ones: 648 windows (2.8 GB) when the cutscene began, 974 (4.3 GB)
@@ -3005,26 +3013,6 @@ static WINDOW_BAND: std::sync::Mutex<crate::host::RamBand> =
 /// again. Called before a submission starts, by the thread that submits.
 pub(crate) fn let_go_idle() {
     const IDLE_FRAMES: u64 = 4;
-    let budget = window_budget();
-    let mut idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
-    let mut keep = u64::MAX;
-    if let Some(bytes) = budget
-        && let Some((working, private, free, commit, total, limit)) = crate::host::ram_sample()
-    {
-        let mut band = WINDOW_BAND.lock().unwrap_or_else(|e| e.into_inner());
-        *band = crate::host::ram_band(*band, working, private, free, commit, total, limit);
-        match *band {
-            crate::host::RamBand::Calm => {}
-            crate::host::RamBand::Watch => {
-                idle_ms = idle_ms.min(10_000);
-                keep = bytes;
-            }
-            crate::host::RamBand::High => {
-                idle_ms = idle_ms.min(2_000);
-                keep = bytes / 2;
-            }
-        }
-    }
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
@@ -3032,28 +3020,17 @@ pub(crate) fn let_go_idle() {
         if map.is_empty() {
             return;
         }
-        let mut eligible: Vec<(u64, (u64, u64), usize, u64)> = map
+        let idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+        let idle: Vec<(u64, u64)> = map
             .iter()
             .filter(|(_, s)| {
                 Arc::strong_count(s) == 1
                     && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, IDLE_FRAMES)
                     && crate::host::references(&s.buffer) == 1
             })
-            .map(|(&key, s)| {
-                (s.used.load(Ordering::Relaxed), key, Arc::as_ptr(s) as usize, s.len)
-            })
+            .map(|(key, _)| *key)
             .collect();
-        eligible.sort_unstable_by_key(|&(used, _, _, _)| used);
-        let victims = if keep == u64::MAX {
-            (0..eligible.len()).collect()
-        } else {
-            let entries: Vec<(u64, u64, usize)> = eligible
-                .iter()
-                .map(|&(used, _, id, len)| (used, len, id))
-                .collect();
-            window_victims(&entries, keep)
-        };
-        victims.into_iter().filter_map(|i| map.remove(&eligible[i].1)).collect()
+        idle.into_iter().filter_map(|key| map.remove(&key)).collect()
     };
     if !gone.is_empty() {
         let (went, bytes) = (gone.len(), gone.iter().map(|s| s.len).sum::<u64>());
@@ -3218,6 +3195,7 @@ impl Shadow {
             card: None,
             window: false,
             changes_only: Default::default(),
+            wc: AtomicU8::new(0),
             mapped: false,
             place: None,
         }
@@ -3248,9 +3226,42 @@ impl Shadow {
         if self.place.is_some() {
             return;
         }
+        // Write-combined title memory, which the title's CPU does not read
+        // (`VICTORY_WC_NO_BACK`, and always for `VICTORY_WC_BAR`'s copies,
+        // which the CPU would read through the bus): what shaders write stays
+        // on the card.
+        if (self.card.is_some() && wc_no_back() && self.len >= wc_no_back_min() || self.mapped && !self.window)
+            && self.write_combined()
+        {
+            self.written.store(true, Ordering::Relaxed);
+            WC_LEFT.fetch_add(len.min(self.left(address)), Ordering::Relaxed);
+            return;
+        }
         self.written.store(true, Ordering::Relaxed);
         let len = len.min(self.left(address));
         list.defer_gpu_write(self, address as usize, len as usize);
+    }
+
+    /// Whether all of the copy's title memory was asked for write-combined
+    /// ([`title_memory_write_combined`]); found once.
+    fn write_combined(&self) -> bool {
+        // 0 unknown, 1 no, 2 yes.
+        match self.wc.load(Ordering::Relaxed) {
+            1 => false,
+            2 => true,
+            _ => {
+                let wc = is_write_combined(self.start, self.len);
+                self.wc.store(if wc { 2 } else { 1 }, Ordering::Relaxed);
+                if wc {
+                    tracing::info!(
+                        start = format_args!("{:#x}", self.start),
+                        len = format_args!("{:#x}", self.len),
+                        "write-combined title memory: what shaders write in its copy is not copied back (VICTORY_WC_NO_BACK)"
+                    );
+                }
+                wc
+            }
+        }
     }
 
     /// At submission, after the range's refresh: a submitted list's shaders
@@ -3742,9 +3753,7 @@ impl Shadow {
         // copy in the PC's memory in the snapshot.
         let busy = if crate::watch::light() { joined(busy) } else { busy };
         let base = start / PAGE;
-        UNDER_NS[9].fetch_add(1, Ordering::Relaxed);
         for (a, e) in busy {
-            let t = std::time::Instant::now();
             // As the refresh itself asks (`update_free`): the journal if
             // the submission's asking covered the range, else the kernel,
             // else the guards. The journal alone said nothing for copies
@@ -3755,13 +3764,10 @@ impl Shadow {
                 note_stale(1);
                 return true;
             };
-            let t = under_ns(0, t);
             let stale: Vec<usize> = {
                 let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
                 stale_pages_in(base, &copied, a, e, &written)
             };
-            UNDER_NS[8].fetch_add(stale.len() as u64, Ordering::Relaxed);
-            let t = under_ns(1, t);
             if stale.is_empty() {
                 continue;
             }
@@ -3784,7 +3790,6 @@ impl Shadow {
                 note_stale(3);
                 return true;
             }
-            let t = under_ns(2, t);
             // A page's part in the range, compared and put in: the runs it
             // changed; none for a page that is not there (left as it is, and
             // looked at again next time) or that had too many.
@@ -3814,23 +3819,16 @@ impl Shadow {
             } else {
                 (0..stale.len()).for_each(one);
             }
-            let t = under_ns(3, t);
             *runs_left = left.into_inner().max(0) as usize;
             let mut taken = Vec::new();
-            // The runs of all the pages, noted at once (`card.dirty` is
-            // sorted and joined when it is taken).
-            let mut changed: Vec<(usize, usize)> = Vec::new();
-            let (mut runs_in, mut bytes_in) = (0u64, 0u64);
             for (i, runs) in done.into_iter().enumerate() {
                 let Some(runs) = runs.into_inner().unwrap_or_else(|e| e.into_inner()) else {
                     continue;
                 };
                 let (lo, hi) = ((stale[i] * PAGE).max(a), ((stale[i] + 1) * PAGE).min(e));
-                runs_in += runs.len() as u64;
-                bytes_in += runs.iter().map(|r| r.1 as u64).sum::<u64>();
-                if self.card.is_some() {
-                    changed.extend(runs.into_iter().map(|(r, m)| (lo - start + r, lo - start + r + m)));
-                }
+                MERGED[1].fetch_add(runs.len() as u64, Ordering::Relaxed);
+                MERGED[2].fetch_add(runs.iter().map(|r| r.1 as u64).sum(), Ordering::Relaxed);
+                self.card_changed_runs(runs.into_iter().map(|(r, m)| (lo - start + r, lo - start + r + m)));
                 // Taken, if the range holds all of the page that is in the
                 // copy; else the rest of it is the refresh's, which notes
                 // only whole pages, and the page is looked at again.
@@ -3838,9 +3836,6 @@ impl Shadow {
                     taken.push(stale[i]);
                 }
             }
-            MERGED[1].fetch_add(runs_in, Ordering::Relaxed);
-            MERGED[2].fetch_add(bytes_in, Ordering::Relaxed);
-            self.card_changed_runs(changed.into_iter());
             drop(before);
             drop(merging);
             {
@@ -3851,7 +3846,6 @@ impl Shadow {
                     }
                 }
             }
-            under_ns(4, t);
             if over.into_inner() {
                 note_stale(2);
                 return true;
@@ -3881,12 +3875,9 @@ impl Shadow {
         TITLE.with_borrow_mut(|title| {
             title.resize(PAGE, 0);
             let title = &mut title[..n];
-            let t = std::time::Instant::now();
             if !crate::host::read_into(lo as *const u8, title) {
                 return Ok(None);
             }
-            let t = under_ns(5, t);
-            let _compared = Compared(t);
             MERGED[0].fetch_add(1, Ordering::Relaxed);
             let at = lo - self.start as usize;
             // SAFETY: the caller's.
@@ -3894,48 +3885,15 @@ impl Shadow {
             if self.card.is_some() {
                 // Whole words go up as pairs, all of them in one
                 // dispatch: only what is a copy of its own counts.
-                // Compared and put in, in one pass ([`under_fused`]), where
-                // the most copies of their own the page can have are left
-                // to take: they are taken first, and what is not used is
-                // given back. (Whole words at word offsets of the copy: a
-                // copy of its own is a run of more than 256 bytes.)
-                let most = (n / 260 + 1) as i64;
-                let fused = crate::host::words_under()
-                    && under_fused()
-                    && !crate::host::upcheck::on()
-                    && at.is_multiple_of(4)
-                    && lo.is_multiple_of(4)
-                    && n.is_multiple_of(4)
-                    && {
-                        if left.fetch_sub(most, Ordering::Relaxed) >= most {
-                            true
-                        } else {
-                            left.fetch_add(most, Ordering::Relaxed);
-                            false
-                        }
-                    };
-                let runs = if fused {
-                    word_runs_put(lo, title, held)
-                } else if crate::host::words_under() {
-                    word_runs(lo, title, held)
-                } else {
-                    changed_runs(title, held)
-                };
+                let runs = if crate::host::words_under() { word_runs(lo, title, held) } else { changed_runs(title, held) };
                 let own = |&&(r, m): &&(usize, usize)| !crate::host::words_under() || !crate::host::goes_as_words(at + r, m);
                 let copies = runs.iter().filter(own).count() as i64;
-                if fused {
-                    debug_assert!(copies <= most);
-                    left.fetch_add(most - copies, Ordering::Relaxed);
-                    return Ok(Some(runs));
-                }
                 if copies > 0 && left.fetch_sub(copies, Ordering::Relaxed) < copies {
                     return Err(());
                 }
                 let was = (!runs.is_empty() && crate::host::upcheck::on()).then(|| held.to_vec());
-                if !fused {
-                    for &(r, m) in &runs {
-                        held[r..r + m].copy_from_slice(&title[r..r + m]);
-                    }
+                for &(r, m) in &runs {
+                    held[r..r + m].copy_from_slice(&title[r..r + m]);
                 }
                 if let Some(was) = was {
                     crate::host::upcheck::note(self.id, at, &was, held);
@@ -4397,13 +4355,11 @@ impl Shadow {
         let Some(card) = &self.card else {
             return;
         };
-        let most = runs.size_hint().0;
         let mut runs = runs.filter(|r| r.0 < r.1).peekable();
         if runs.peek().is_none() {
             return;
         }
         let mut dirty = card.dirty.lock().unwrap_or_else(|e| e.into_inner());
-        dirty.reserve(most);
         for (from, to) in runs {
             match dirty.last_mut() {
                 Some(last) if from <= last.1 && to >= last.0 => *last = (last.0.min(from), last.1.max(to)),
@@ -4411,7 +4367,11 @@ impl Shadow {
             }
         }
         // (Under the lock: what takes the list sees it or finds it set.)
-        card.touched.store(true, Ordering::Release);
+        if !card.touched.swap(true, Ordering::AcqRel)
+            && let Some(me) = card.me.get()
+        {
+            TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(me.clone());
+        }
     }
 
     /// Whether shaders were ever declared to write it.
@@ -4708,6 +4668,7 @@ impl Shadow {
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
                 touched: Default::default(),
+                me: std::sync::OnceLock::new(),
                 size: len.next_multiple_of(PIECE as u64),
             });
         }
@@ -4864,6 +4825,7 @@ mod land_tests {
             dirty: Mutex::default(),
             sent: Mutex::default(),
                 touched: Default::default(),
+                me: std::sync::OnceLock::new(),
             size: len as u64,
         });
         Some(shadow)
@@ -5003,7 +4965,7 @@ mod land_tests {
             });
             let mut now = vec![0u8; LEN];
             for round in 1..200u32 {
-                for block in (0..BLOCKS).filter(|b| !(*b as u32 * 5 + round).is_multiple_of(3)) {
+                for block in (0..BLOCKS).filter(|b| (*b as u32 * 5 + round) % 3 != 0) {
                     for i in (block * PIECE / 4 + 3..(block + 1) * PIECE / 4).step_by(4) {
                         now[i * 4..i * 4 + 4].copy_from_slice(&(round << 20 | i as u32).to_le_bytes());
                     }
@@ -5267,6 +5229,29 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
             entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, len, false)));
             return entry.shadow.clone();
         }
+        // Write-combined memory with `VICTORY_WC_BAR`: one buffer in the card's
+        // memory that the CPU maps, no CPU's side, nothing sent, and what
+        // shaders write stays there ([`wc_bar`]).
+        if wc_bar()
+            && is_write_combined(key.0, len)
+            && let Some((buffer, data)) = wc_mapped_for(size)
+        {
+            crate::host::name(&buffer, || {
+                format!("title buffer {:#x}+{len:#x} mapped on the card", key.0)
+            });
+            tracing::info!(
+                start = format_args!("{:#x}", key.0),
+                len,
+                "a write-combined buffer's host copy is in card memory the CPU maps"
+            );
+            // SAFETY: a live buffer.
+            let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+            let mut shadow = Shadow::new(buffer, data, gpu, key.0, len);
+            shadow.mapped = true;
+            *shadow.wc.get_mut() = 2;
+            entry.shadow = Some(Arc::new(shadow));
+            return entry.shadow.clone();
+        }
         let (buffer, data) = host()?.shared_buffer(size)?;
         crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // A big one, with `cards`: shaders get a buffer in the card's own
@@ -5285,6 +5270,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
                     dirty: Mutex::default(),
                     sent: Mutex::default(),
                 touched: Default::default(),
+                me: std::sync::OnceLock::new(),
                     size,
                 };
                 (on_card, Some(card))
@@ -5310,7 +5296,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         shadow.card = card;
         let shadow = Arc::new(shadow);
         if shadow.card.is_some() {
-            CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+            carded(&shadow);
         }
         entry.shadow = Some(shadow);
     }
@@ -5490,21 +5476,12 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
     let room = host.video_memory().is_none_or(|[budget, used, ..]| used + len < budget / 100 * 97);
     let (staging, data) = host.shared_buffer(len)?;
     let on_card = if room && USED.fetch_add(len, Ordering::Relaxed) + len <= most {
-        host.uav_buffer(len).or_else(|| {
-            USED.fetch_sub(len, Ordering::Relaxed);
-            None
-        })
+        host.uav_buffer(len)
     } else {
-        if room {
-            USED.fetch_sub(len, Ordering::Relaxed);
-        }
         None
     };
     let buffer = match on_card {
-        Some(buffer) => {
-            BY_ADDRESS_CARD_BYTES.fetch_add(len, Ordering::Relaxed);
-            buffer
-        }
+        Some(buffer) => buffer,
         None => host.shared_buffer(len)?.0,
     };
     crate::host::name(&staging, || format!("title memory {start:#x}+{len:#x} by address, the CPU's side"));
@@ -5522,10 +5499,11 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
         dirty: Mutex::default(),
         sent: Mutex::default(),
         touched: Default::default(),
+        me: std::sync::OnceLock::new(),
         size: len,
     });
     let shadow = Arc::new(shadow);
-    CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+    carded(&shadow);
     Some(shadow)
 }
 
@@ -5611,6 +5589,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
                 touched: Default::default(),
+                me: std::sync::OnceLock::new(),
                 size: len,
             };
             (on_card, Some(card))
@@ -5629,7 +5608,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     shadow.card = card;
     let shadow = Arc::new(shadow);
     if shadow.card.is_some() {
-        CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+        carded(&shadow);
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());
@@ -5719,42 +5698,60 @@ pub(crate) fn exact_line(frames: f64) {
 }
 
 #[cfg(test)]
+mod write_combined_tests {
+    use super::{is_write_combined, title_memory_write_combined, write_combined_freed};
+
+    /// A copy counts as write-combined only inside one such region, and not
+    /// after the region is let go (part of it or the whole allocation).
+    #[test]
+    fn write_combined_regions() {
+        // Addresses of their own: other tests share the registry.
+        let base = 0x7f00_0000_0000usize;
+        title_memory_write_combined(base, 0x100_0000);
+        assert!(is_write_combined(base as u64, 0x1000));
+        assert!(is_write_combined(base as u64 + 0xff_f000, 0x1000));
+        assert!(
+            !is_write_combined(base as u64 + 0xff_f000, 0x2000),
+            "past its end"
+        );
+        assert!(
+            !is_write_combined(base as u64 - 0x1000, 0x2000),
+            "before its start"
+        );
+        write_combined_freed(base + 0x10_0000, 0x1000);
+        assert!(
+            !is_write_combined(base as u64, 0x1000),
+            "part of it decommitted"
+        );
+        let other = base + 0x1000_0000;
+        title_memory_write_combined(other, 0x10_0000);
+        write_combined_freed(other, 0);
+        assert!(
+            !is_write_combined(other as u64, 0x1000),
+            "the allocation released"
+        );
+    }
+}
+
+#[cfg(test)]
 mod window_tests {
     use super::{
         WINDOW, cover, default_card_limits_mb, grid, holder, longest_tail, resolve_card_limits,
-        tail_of, window_of, window_victims,
+        tail_of, window_of,
     };
-
-    #[test]
-    fn window_budget_evicts_oldest_only_until_it_fits() {
-        const M: u64 = 1 << 20;
-        // Oldest first: 10, 20 and 30 MiB. Keeping 50 MiB must free only the
-        // oldest copy (60 MiB left before, 50 MiB after).
-        let entries = [(1u64, 10 * M, 1usize), (2, 20 * M, 2), (3, 30 * M, 3)];
-        assert_eq!(window_victims(&entries, 50 * M), vec![0]);
-        // A tighter cap takes the newest as well.
-        assert_eq!(window_victims(&entries, 20 * M), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn window_budget_counts_one_copy_under_several_keys_once() {
-        const M: u64 = 1 << 20;
-        // The first two entries are one copy; 50 MiB is live, not 80.
-        // Without dedupe both would be picked to reach a 40 MiB cap.
-        let entries = [(1u64, 30 * M, 7usize), (2, 30 * M, 7), (3, 20 * M, 8)];
-        assert_eq!(window_victims(&entries, 40 * M), vec![0]);
-    }
 
     #[test]
     fn card_limits_scale_with_local_vram_budget() {
         const GIB: u64 = 1 << 30;
         const MIB: u64 = 1 << 20;
 
-        // Unknown (WARP / query failure) and <= 12 GiB keep the 12 GB baseline.
+        // Unknown (WARP / query failure): the old baseline. <= 12 GiB: 18% of
+        // the budget, 512 to 2048 MiB.
         assert_eq!(default_card_limits_mb(None), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(8 * GIB)), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(11 * GIB)), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(12 * GIB)), (16, 512));
+        assert_eq!(default_card_limits_mb(Some(2 * GIB)), (16, 512));
+        assert_eq!(default_card_limits_mb(Some(8 * GIB)), (16, 1474));
+        assert_eq!(default_card_limits_mb(Some(11229 * MIB)), (16, 2021));
+        assert_eq!(default_card_limits_mb(Some(12 * GIB)), (16, 2048));
 
         // 16 GB tier (> 12 GiB, < 20 GiB), including WDDM budgets around 13.5–15 GiB.
         assert_eq!(default_card_limits_mb(Some(13 * GIB)), (4, 2048));
@@ -5773,6 +5770,16 @@ mod window_tests {
         assert_eq!(resolve_card_limits(Some(12 * GIB), Some(0), Some(1024)), (MIB, 1024 * MIB));
         assert_eq!(resolve_card_limits(None, Some(u64::MAX), Some(u64::MAX)), (u64::MAX, u64::MAX));
         assert_eq!(resolve_card_limits(None, None, None), (16 * MIB, 512 * MIB));
+    }
+
+    #[test]
+    fn window_room_follows_the_budget() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(super::default_window_card_mb(None), 0);
+        assert_eq!(super::default_window_card_mb(Some(6 * GIB)), 0);
+        assert_eq!(super::default_window_card_mb(Some(8 * GIB)), 737);
+        assert_eq!(super::default_window_card_mb(Some(11229 << 20)), 1010);
+        assert_eq!(super::default_window_card_mb(Some(24 * GIB)), 1024);
     }
 
     /// An ask that may take any window takes the longest that holds all of

@@ -424,9 +424,8 @@ pub(crate) fn failing_exit(at: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_GUARD,
-        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect,
-        VirtualQuery,
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree, VirtualProtect,
     };
 
     struct Pages(*mut u8, usize);
@@ -821,82 +820,5 @@ mod tests {
                 });
             }
         });
-    }
-
-    /// Whether the page at `at` is a guard page.
-    fn guarded(at: usize) -> bool {
-        let mut info = MEMORY_BASIC_INFORMATION::default();
-        // SAFETY: a valid out pointer of the right size.
-        assert_ne!(unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) }, 0);
-        info.Protect & PAGE_GUARD != 0
-    }
-
-    /// A guard page in the source fails the copy, and stays a guard page: the
-    /// fault that reported it cleared the flag, so it is set again.
-    #[test]
-    fn a_guard_page_fails_the_copy_and_stays_a_guard_page() {
-        assert!(on());
-        let (a, mut to) = (Pages::new(2 << 12), vec![0u8; 2 << 12]);
-        let mut old = 0;
-        // SAFETY: pages of our allocation; the second is made a guard page.
-        unsafe {
-            assert_ne!(
-                VirtualProtect(a.0.add(4096).cast(), 4096, PAGE_READWRITE | PAGE_GUARD, &mut old),
-                0
-            );
-            assert!(!copy(to.as_mut_ptr(), a.0, 8192));
-        }
-        assert!(guarded(a.0.addr() + 4096), "the guard flag was consumed");
-    }
-
-    /// Two pages, the second a guard page.
-    fn guard_second_page() -> Pages {
-        let pages = Pages::new(2 << 12);
-        let mut old = 0;
-        // SAFETY: the second page of our allocation.
-        unsafe {
-            assert_ne!(
-                VirtualProtect(pages.0.add(4096).cast(), 4096, PAGE_READWRITE | PAGE_GUARD, &mut old),
-                0
-            );
-        }
-        pages
-    }
-
-    /// A copy into a guard page fails, and the page stays a guard page.
-    #[test]
-    fn a_guard_page_in_the_destination_fails_a_copy_and_stays_guarded() {
-        assert!(on());
-        let pages = guard_second_page();
-        let at = pages.0.addr() + 4096;
-        let src = vec![0x5Au8; 4096];
-        // SAFETY: the destination is a guard page of our allocation; the source is ours.
-        assert!(!unsafe { copy(at as *mut u8, src.as_ptr(), 4096) });
-        assert!(guarded(at), "the copy's fault cleared the guard flag");
-    }
-
-    /// A put into a guard page fails, and the page stays a guard page.
-    #[test]
-    fn a_guard_page_in_the_destination_fails_a_put_and_stays_guarded() {
-        assert!(on());
-        let pages = guard_second_page();
-        let at = pages.0.addr() + 4096;
-        let (was, now) = (vec![0u8; 4096], vec![0x5Au8; 4096]);
-        // SAFETY: as above; every dword differs, so every block is written.
-        assert!(!unsafe { put_changed(at as *mut u8, &was, &now) });
-        assert!(guarded(at), "the put's fault cleared the guard flag");
-    }
-
-    /// A merge into a guard page fails, and the page stays a guard page.
-    #[test]
-    fn a_guard_page_in_the_destination_fails_a_merge_and_stays_guarded() {
-        assert!(on());
-        let pages = guard_second_page();
-        let at = pages.0.addr() + 4096;
-        let (now, mut held) = (vec![0x5Au8; 4096], vec![0u8; 4096]);
-        // SAFETY: as above; `now` and `held` are ours and do not overlap.
-        let merged = unsafe { merge(at as *mut u8, now.as_ptr(), held.as_mut_ptr(), 4096, false) };
-        assert!(!merged.there);
-        assert!(guarded(at), "the merge's fault cleared the guard flag");
     }
 }

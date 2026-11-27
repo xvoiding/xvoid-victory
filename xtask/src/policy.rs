@@ -15,11 +15,9 @@ const MAX_FILE_SIZE: usize = 640 * 1024;
 const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
+    "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh", "py",
     // The launcher (launcher/): C# and WPF source and project files, all text we write.
     "cs", "csproj", "xaml", "props", "sln", "manifest",
-    // ...and the script that draws the launcher's icon.
-    "py",
 ];
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
@@ -99,7 +97,7 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
     )
 }
 
-pub(crate) fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
+fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
     let git = |args: &[&str]| -> Result<Option<Vec<String>>> {
         let out = Command::new("git")
             .args(args)

@@ -149,8 +149,28 @@ const _: () = assert!(offset_of!(List, pipeline_shadow) + 32 == 0x560);
 /// Runs `f` with the host list and draw state of a title list, if there
 /// is a host GPU.
 #[cfg(windows)]
-pub(crate) fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
-    let Some(list) = host_list(this) else { return };
+fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+    with_state_on(host_list(this), this, f);
+}
+
+/// As [`with_state`], for a call that only changes what the next draw or
+/// dispatch binds, which records nothing until then: not counted as a title
+/// call ([`crate::host::HostList::title_call`]); an indirect execution held
+/// back may still be joined if the binding stays as it was
+/// ([`crate::indirect::merge`]).
+#[cfg(windows)]
+fn with_binding(this: This, f: impl FnOnce(&mut crate::draw::State)) {
+    with_state_on(host_list_held(this), this, |_, s| f(s));
+}
+
+/// As [`with_state`], with `list`, the host list of `this` as it was taken.
+#[cfg(windows)]
+fn with_state_on(
+    list: Option<&crate::host::HostList>,
+    this: This,
+    f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State),
+) {
+    let Some(list) = list else { return };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     // SAFETY: the title passes one of our lists.
@@ -158,6 +178,42 @@ pub(crate) fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut
     f(list, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
     #[cfg(feature = "diagnostics")]
     crate::copystat::recorded(started);
+}
+
+/// Work of ours at a place in a title list (DLSS in place of the title's
+/// FidelityFX upscaling, `crate::streamline`): it is given the host list
+/// there and says whether it recorded into it; if it did, what the title set
+/// is set again before the title's next draw or dispatch.
+#[cfg(windows)]
+pub(crate) type External = Box<dyn FnOnce(&crate::host::HostList) -> bool + Send>;
+
+/// Runs `work` at this place of title list `this`: now, or, with
+/// `VICTORY_THIN=1`, when the list's calls are translated (in their order).
+/// False if the list records nowhere.
+#[cfg(windows)]
+pub(crate) fn external(this: This, work: External) -> bool {
+    if this.is_null() {
+        return false;
+    }
+    let work = match thin::put_external(this, work) {
+        Ok(()) => return true,
+        Err(work) => work,
+    };
+    if host_list(this).is_none() {
+        return false;
+    }
+    run_external(this, work);
+    true
+}
+
+/// [`external`]'s work on the list that records `this`'s calls.
+#[cfg(windows)]
+fn run_external(this: This, work: External) {
+    with_state(this, |host, state| {
+        if work(host) {
+            state.replay(host);
+        }
+    });
 }
 
 /// The submission of `lists` has run: each gives its descriptor tables'
@@ -177,9 +233,22 @@ pub(crate) fn tables_done(lists: &[This]) {
     }
 }
 
-/// The host list behind a title list, if there is a host GPU.
+/// The host list behind a title list, if there is a host GPU, for a call
+/// that records into it: counted as a title call, which records an
+/// indirect execution held back first ([`crate::host::HostList::title_call`]).
 #[cfg(windows)]
 pub(crate) fn host_list<'a>(this: This) -> Option<&'a crate::host::HostList> {
+    let list = host_list_held(this)?;
+    list.title_call();
+    Some(list)
+}
+
+/// As [`host_list`], not counted as a title call and recording nothing:
+/// for an indirect execution, which may join the one held back
+/// ([`crate::indirect::merge`]), and for calls that only change the binding
+/// ([`with_binding`]).
+#[cfg(windows)]
+fn host_list_held<'a>(this: This) -> Option<&'a crate::host::HostList> {
     if this.is_null() {
         return None;
     }
@@ -205,8 +274,7 @@ impl Detached {
     }
 
     /// Releases this list's dynamic descriptor slots once its GPU submission
-    /// has completed, without waiting for the full `bury_lag` (64 submissions)
-    /// allocator delay: preventing dynamic slot exhaustion at ~10k draws/frame.
+    /// has completed, without waiting for the full `bury_lag` allocator delay.
     pub(crate) fn release_tables(&mut self) {
         self._state.tables_done();
     }
@@ -408,14 +476,16 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
             continue;
         };
         // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        // reset, which finds it so (or wants it closed).
+        fresh.leave_open();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
         let Some(host) = list.host.replace(fresh) else {
             continue;
         };
+        // (Submitted again without a reset: it runs closed, empty.)
+        host.close_if_left_open();
         let earlier = std::mem::take(&mut list.earlier);
         let gate = std::mem::take(&mut list.gate);
         let uploads = std::mem::take(&mut *list.uploads.lock().unwrap_or_else(|e| e.into_inner()));
@@ -480,8 +550,8 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
             continue;
         };
         // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        // reset, which finds it so (or wants it closed).
+        fresh.leave_open();
         let list = this.cast_mut().cast::<List>();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
@@ -489,6 +559,8 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
             let Some(host) = (*list).host.replace(fresh) else {
                 continue;
             };
+            // (Submitted again without a reset: it runs closed, empty.)
+            host.close_if_left_open();
             let uploads =
                 std::mem::take(&mut *(*list).uploads.lock().unwrap_or_else(|e| e.into_inner()));
             let state =
@@ -812,7 +884,7 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
                 )
             };
             // SAFETY: an open list and live resources.
-            unsafe { list.list.barriers(host) };
+            unsafe { list.list.ResourceBarrier(host) };
         }
     }
     0
@@ -825,9 +897,8 @@ pub(crate) fn ensure_state(list: &crate::host::HostList, resource: This, state: 
     if let Some((texture, before)) = list.transition(resource, state) {
         let state = crate::host::legal_state(texture, state);
         let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
-        // SAFETY: an open list and a live texture (the list's states hold
-        // it).
-        unsafe { list.list.barriers(&[barrier]) };
+        // SAFETY: an open list and a live texture.
+        unsafe { list.list.ResourceBarrier(&[barrier]) };
     }
 }
 
@@ -1546,7 +1617,7 @@ static ALLOCATOR_FUNCTIONS: Table<24> = {
 extern "system" fn set_pipeline(this: This, pipeline: This) {
     crate::pipeline::bound(pipeline);
     #[cfg(windows)]
-    with_state(this, |_, state| state.set_pipeline(pipeline));
+    with_binding(this, |state| state.set_pipeline(pipeline));
     #[cfg(not(windows))]
     let _ = this;
 }
@@ -1585,7 +1656,7 @@ extern "system" fn sync(this: This, flags: u32, control: u32, address: u64, size
             // SAFETY: the same layout; no resource named.
             let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
             // SAFETY: an open list.
-            unsafe { list.list.barriers(&[barrier]) };
+            unsafe { list.list.ResourceBarrier(&[barrier]) };
         }
     }
     let _ = (this, flags, control, address, size);
@@ -1648,7 +1719,7 @@ extern "system" fn ignored_state(_: This) {}
 /// set on the host list at once. Without a host GPU these do nothing.
 #[cfg(windows)]
 mod state {
-    use super::{This, with_state};
+    use super::{This, with_binding, with_state};
     use crate::draw::{IndexView, VertexView};
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Direct3D12::D3D12_VIEWPORT;
@@ -1690,16 +1761,16 @@ mod state {
         with_state(this, |list, s| s.set_depth_bounds(list, min, max));
     }
     pub(super) extern "system" fn heaps(this: This, count: u32, heaps: *const This) {
-        with_state(this, |_, s| s.set_heaps(items(heaps, count)));
+        with_binding(this, |s| s.set_heaps(items(heaps, count)));
     }
     pub(super) extern "system" fn compute_table(this: This, slot: u32, handle: u64) {
-        with_state(this, |_, s| s.set_table(true, slot, handle));
+        with_binding(this, |s| s.set_table(true, slot, handle));
     }
     pub(super) extern "system" fn graphics_table(this: This, slot: u32, handle: u64) {
-        with_state(this, |_, s| s.set_table(false, slot, handle));
+        with_binding(this, |s| s.set_table(false, slot, handle));
     }
     pub(super) extern "system" fn compute_constant(this: This, slot: u32, value: u32, offset: u32) {
-        with_state(this, |_, s| s.set_constants(true, slot, &[value], offset));
+        with_binding(this, |s| s.set_constants(true, slot, &[value], offset));
     }
     pub(super) extern "system" fn graphics_constant(
         this: This,
@@ -1707,7 +1778,7 @@ mod state {
         value: u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| s.set_constants(false, slot, &[value], offset));
+        with_binding(this, |s| s.set_constants(false, slot, &[value], offset));
     }
     pub(super) extern "system" fn compute_constants(
         this: This,
@@ -1716,9 +1787,7 @@ mod state {
         values: *const u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| {
-            s.set_constants(true, slot, items(values, count), offset)
-        });
+        with_binding(this, |s| s.set_constants(true, slot, items(values, count), offset));
     }
     pub(super) extern "system" fn graphics_constants(
         this: This,
@@ -1727,20 +1796,18 @@ mod state {
         values: *const u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| {
-            s.set_constants(false, slot, items(values, count), offset)
-        });
+        with_binding(this, |s| s.set_constants(false, slot, items(values, count), offset));
     }
     /// Root constant buffer, shader resource and unordered access views.
     pub(super) extern "system" fn compute_view(this: This, slot: u32, address: u64) {
-        with_state(this, |_, s| s.set_view(true, slot, address));
+        with_binding(this, |s| s.set_view(true, slot, address));
     }
     pub(super) extern "system" fn graphics_view(this: This, slot: u32, address: u64) {
-        with_state(this, |_, s| s.set_view(false, slot, address));
+        with_binding(this, |s| s.set_view(false, slot, address));
     }
     pub(super) extern "system" fn index_buffer(this: This, view: *const IndexView) {
         // SAFETY: the title passes a view or null.
-        with_state(this, |_, s| s.set_index_buffer(unsafe { view.as_ref() }));
+        with_binding(this, |s| s.set_index_buffer(unsafe { view.as_ref() }));
     }
     pub(super) extern "system" fn vertex_buffers(
         this: This,
@@ -1748,7 +1815,7 @@ mod state {
         count: u32,
         views: *const VertexView,
     ) {
-        with_state(this, |_, s| {
+        with_binding(this, |s| {
             if views.is_null() {
                 s.clear_vertex_buffers(start, count);
             } else {
@@ -1907,7 +1974,7 @@ extern "system" fn execute_indirect(
         const DISPATCH: u32 = 2;
         const DISPATCH_SINGLE: u32 = 105;
         let kind = if *kind == DISPATCH_SINGLE { DISPATCH } else { *kind };
-        with_state(this, |list, s| {
+        with_state_on(host_list_held(this), this, |list, s| {
             ran = s.execute_indirect(list, (kind, stride, max), address, counter);
         });
     } else {
@@ -2158,7 +2225,7 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
         // SAFETY: the same layout; no resource named.
         let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
         // SAFETY: an open list.
-        unsafe { list.list.barriers(&[barrier]) };
+        unsafe { list.list.ResourceBarrier(&[barrier]) };
     }
     #[cfg(not(windows))]
     let _ = (this, count);

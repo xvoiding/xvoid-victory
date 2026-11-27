@@ -557,10 +557,10 @@ fn small_float(bits: u32, man: u32) -> f32 {
     }
 }
 
-/// Converts host-format rows to opaque 8-bit RGBA for the RGB dump. Byte
-/// colors and packed 16-bit BGR use their full channel range. Other formats
-/// scale to the highest finite value, with single channels shown in grey
-/// from their lowest to highest value. Returns `None` for unhandled formats.
+/// Rows of a host format as 8-bit RGBA: 8-bit color as is, everything else
+/// as channel values scaled so the largest finite one is white (single
+/// channels: lowest black, highest white, as grey). `None` for formats not
+/// handled.
 fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(w * h * 4);
     let px = |x: usize, y: usize, n: usize| &rows[y * pitch + x * n..][..n];
@@ -584,30 +584,6 @@ fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option
                 for x in 0..w {
                     let p = px(x, y, 4);
                     out.extend([p[2], p[1], p[0], 255]);
-                }
-            }
-            return Some(out);
-        }
-        // B5G6R5, B5G5R5A1 and B4G4R4A4 store blue in the low bits.
-        85 | 86 | 115 => {
-            let (rb_bits, green_bits) = match format {
-                85 => (5, 6),
-                86 => (5, 5),
-                _ => (4, 4),
-            };
-            let unorm8 = |value: u16, bits: u32| {
-                let max = (1u16 << bits) - 1;
-                (((value & max) * 255 + max / 2) / max) as u8
-            };
-            for y in 0..h {
-                for x in 0..w {
-                    let word = u16_at(px(x, y, 2), 0);
-                    out.extend([
-                        unorm8(word >> (rb_bits + green_bits), rb_bits),
-                        unorm8(word >> rb_bits, green_bits),
-                        unorm8(word, rb_bits),
-                        255,
-                    ]);
                 }
             }
             return Some(out);
@@ -870,28 +846,6 @@ mod tests {
     #[test]
     fn crc_matches_the_png_check_value() {
         assert_eq!(super::crc32(b"IEND"), 0xae42_6082);
-    }
-
-    #[test]
-    fn packed_bgr_targets_preserve_color_and_skip_row_padding() {
-        // Each 2x2 target has red, green, blue and a mixed color. The first
-        // row has a padding word, and alpha bits do not affect the RGB dump.
-        for (format, words, mixed) in [
-            (85, [0xf800u16, 0x07e0, 0x001f, 0x8408], [132, 130, 66, 255]),
-            (86, [0x7c00, 0x03e0, 0x801f, 0xc208], [132, 132, 66, 255]),
-            (115, [0x0f00, 0x00f0, 0xf00f, 0xf841], [136, 68, 17, 255]),
-        ] {
-            let [red, green, blue, blend] = words;
-            let rows = [red, green, 0xcafe, blue, blend]
-                .map(u16::to_le_bytes)
-                .concat();
-            let expected = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], mixed].concat();
-            assert_eq!(
-                super::to_rgba(format, 2, 2, 6, &rows),
-                Some(expected),
-                "format {format}"
-            );
-        }
     }
 
     /// R16G16B16A16_UNORM is integers, not half floats; 89 is 10:10:10:2,

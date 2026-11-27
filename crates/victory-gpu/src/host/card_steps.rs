@@ -201,6 +201,7 @@ pub(super) fn copied_read(copies: &[Writer], runs: &[&HostList]) -> bool {
                 .iter()
                 .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !Arc::ptr_eq(s, shadow))),
             Step::Host(_, (from, to)) => copies.iter().any(|w| w.from < *to && *from < w.to),
+            Step::Plane((at, len), _) => copies.iter().any(|w| w.from < at.saturating_add(*len) && *at < w.to),
             _ => false,
         })
     })
@@ -440,6 +441,11 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                         asked: touches(written, at, at + len),
                     }
                 }
+                &Step::Plane((at, len), _) => Does::Read {
+                    from: at,
+                    to: at.saturating_add(len),
+                    asked: touches(written, at, at.saturating_add(len)),
+                },
                 &Step::Host(_, (from, to)) if from < to => Does::Read { from, to, asked: false },
                 Step::Refresh(shadow, at, len) => Does::Refresh {
                     shadow: Arc::as_ptr(shadow) as usize,
@@ -662,11 +668,8 @@ impl Host {
             }
             (line.written.clone(), copies(&line))
         };
-        let looked = crate::timeline::span("steps on the card: whether in the way");
         blocked_by(&written, runs, false)?;
-        let read = copied_read(&copies, runs);
-        looked.end();
-        let taken = if read {
+        let taken = if copied_read(&copies, runs) {
             Err("a copy done on the card is read through another host copy")
         } else {
             self.take_steps(&written, runs)
@@ -912,18 +915,6 @@ pub(super) fn log(frames: f64) {
     );
     #[cfg(feature = "diagnostics")]
     {
-        let r: Vec<f64> = place::READERS.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
-        if r.iter().any(|&n| n > 0.0) {
-            tracing::info!(
-                "what a copy at its place writes, found read on the CPU behind it, per frame (looks, all threads): {:.2} by \
-                 another such copy, {:.2} by a buffer copy, {:.2} by a fill, {:.2} by a texture, {:.2} by a step of ours",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                r[4]
-            );
-        }
         let noted = NOTED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
         let mut noted: Vec<_> = noted.into_iter().collect();
         noted.sort_unstable_by_key(|(_, e)| std::cmp::Reverse(e.0));

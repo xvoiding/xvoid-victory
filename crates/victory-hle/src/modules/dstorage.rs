@@ -227,15 +227,16 @@ extern "system" fn create_queue(
     )
 }
 
-/// The title asks for 32 MiB and stops if this fails.
-///
-/// `VICTORY_DSTORAGE_STAGING_MB=<n>`: at least that much (codec-d/cool_fox
-/// 641835a4, which makes it 256 MiB by default, so multi-MB RPF chunks do
-/// not starve the other cores); unset: what the title asks for.
+/// The title asks for 32 MiB and stops if this fails. Give PC worker threads
+/// enough staging headroom (default 256 MiB) so multi-MB RPF chunks don't
+/// starve the remaining cores.
 extern "system" fn set_staging_buffer_size(_: Factory, size: u32) -> HRESULT {
     static FLOOR_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let floor = *FLOOR_MB.get_or_init(|| {
-        std::env::var("VICTORY_DSTORAGE_STAGING_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
+        std::env::var("VICTORY_DSTORAGE_STAGING_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(256)
     }) << 20;
     tracing::info!(size, floor, "dstorage: staging buffer size");
     if let Some(scheduler) = scheduler() {
@@ -438,7 +439,7 @@ fn read_direct(file: &std::fs::File, out: &mut [u8], offset: u64) -> std::io::Re
     /// Read at a time.
     const MOST: usize = 1 << 20;
     let sector = SECTOR as u64;
-    if offset.is_multiple_of(sector) && out.len().is_multiple_of(SECTOR) && (out.as_ptr() as usize).is_multiple_of(SECTOR) {
+    if offset % sector == 0 && out.len() % SECTOR == 0 && out.as_ptr() as usize % SECTOR == 0 {
         return read_overlapped(file, out, offset);
     }
     thread_local! {
@@ -2145,7 +2146,7 @@ mod tests {
         for round in 0..2 {
             for mode in [Io::One, Io::Handles, Io::Overlapped, Io::Direct] {
                 let file = Files::open_for_test(&path, mode);
-                let at: Vec<u64> = (0..READS).map(|_| (random() % (len - SIZE as u64)) & !15).collect();
+                let at: Vec<u64> = (0..READS).map(|_| random() % (len - SIZE as u64) & !15).collect();
                 for pass in ["cold", "again"] {
                     let next = std::sync::atomic::AtomicUsize::new(0);
                     let busy = AtomicU64::new(0);

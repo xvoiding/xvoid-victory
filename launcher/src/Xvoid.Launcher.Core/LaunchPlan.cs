@@ -76,7 +76,9 @@ public static class Plans
 
         // Frees 2-3 GB of card memory; only worth it when the card is small.
         if (sys.BestGpu?.VramGb is < 12) env["VICTORY_LEVELS_ON_DEMAND"] = "1";
-        if (s.RayTracing) env["VICTORY_BVH_BUILDER"] = "1";
+        // The title's own ray tracing stays off unless asked for: on the NVIDIA engine it is slow and breaks the
+        // picture. Said outright ("0") so nothing else in the environment can turn it on.
+        env["VICTORY_BVH_BUILDER"] = s.RayTracing ? "1" : "0";
         if (s.AmbientLight) env["VICTORY_AMBIENT"] = "0.8";
         if (budget > 0) env["VICTORY_TEXTURE_BUDGET_MB"] = budget.ToString();
         if (s.RecordPipelines) env["VICTORY_PIPELINE_BOOK"] = "1";
