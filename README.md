@@ -1,7 +1,7 @@
 # xvoid-victory
 
 A fork of [trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
-(`main`, `0cef07e`, 2026-11-27), the NVIDIA build of
+(`main`, `df2daaf`, 2026-11-27), the NVIDIA build of
 [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX), itself a
 fork of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
 layer that runs an Xbox Series title natively on Windows from files the user
@@ -9,15 +9,26 @@ supplies. It is made by xvoid with [Claude Code](https://claude.com/claude-code)
 Licence GPL-3.0-or-later, credits as in `LICENSE`.
 
 This repository's runtime is that engine, taken as it is, with this fork's
-launcher, scripts and policy checks on top (`main` is the same tree as the branch
-`nvidia-base`). Its README says it was tested on one PC, a GeForce RTX 5070 with
-12 GB; nothing here has been run on it, least of all on an 8 GB card. The title's
-own **ray tracing is off** (the launcher says so outright, `VICTORY_BVH_BUILDER=0`;
-turning it on is slow and breaks the picture). The branches `belobug-base`
-(Belobug's AMD fork) and `cgbj-base`
-([Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork)) carry the same
-launcher on those engines. The numbers under "Status of this fork" were taken on
-none of them.
+launcher, scripts and policy checks on top. Its README says it was tested on one
+PC, a GeForce RTX 5070 with 12 GB; nothing here has been run on it, least of all
+on an 8 GB card. The title's own **ray tracing is off** (the launcher says so
+outright, `VICTORY_BVH_BUILDER=0`; turning it on is slow and breaks the picture).
+
+**Two engines, one launcher.** The launcher has an **Auto / NVIDIA / AMD** toggle
+(Play, Engine and Settings pages) and installs both side by side, each with its
+own shader cache; the saves are shared. Releases carry both:
+
+| Engine | Source | Notes |
+|---|---|---|
+| NVIDIA | this tree (VIctory-NVIDIA `df2daaf`) | The engine's own settings table, DLSS upscaling and frame generation (RTX 40 series and newer, 2x) once "Get NVIDIA DLSS files" has been run on the Prepare page, and a one-time warm-up of each new build. |
+| AMD | the commit the `belobug-base` branch holds (Belobug's AMD fork) | The tuning the Radeon cards were played with. [n0c4p7s/belobug-victory](https://github.com/n0c4p7s/belobug-victory) is a re-upload of this same engine code; the history here is the original. |
+
+Both are built as **release** builds (`cargo build --release`); earlier
+releases shipped the slower `diag` profile with the diagnostics counters. The
+branches `belobug-base` and `cgbj-base`
+([Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork)) are those engines as
+they were taken. The numbers under "Status of this fork" were taken on none of
+them.
 
 The 7900 XTX fork was tuned for **AMD RDNA 3 with 24 GB of video memory and 64 GB
 of RAM**. This one is about getting the same layer to start and stay stable on
@@ -92,7 +103,7 @@ tools, and your own dump of the title.
 git clone https://github.com/xvoiding/xvoid-victory
 cd xvoid-victory
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
+cargo build --locked --release -p victory
 scripts\play.ps1 -Exe <path of your copy's executable>
 ```
 

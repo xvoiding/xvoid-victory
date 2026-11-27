@@ -2,7 +2,8 @@ using System.Text.RegularExpressions;
 
 namespace Xvoid.Launcher.Core;
 
-public sealed record FrameStat(double Fps, double Ms, int? Draws);
+/// <summary>Frames rendered a second, ms a frame, draws; Shown is what frame generation puts on the screen (null without it).</summary>
+public sealed record FrameStat(double Fps, double Ms, int? Draws, double? Shown = null);
 public sealed record MemoryStat(double PrivateGb, double? CommitLeftGb, double? RamFreeGb);
 public sealed record WarmProgress(int Done, int Total, int Seconds);
 
@@ -22,8 +23,9 @@ public static partial class LogParser
     [GeneratedRegex(@"(?<n>\d+) draws/frame")]
     private static partial Regex Draws();
 
-    // Title bar: "Americas | VIctory 5 fps 197.9 ms/frame 3668 draws/frame"
-    [GeneratedRegex(@"(?<fps>\d+(?:\.\d+)?) fps\s+(?<ms>\d+(?:\.\d+)?) ms/frame\s+(?<draws>\d+) draws/frame")]
+    // Title bar: "Americas | VIctory 5 fps 197.9 ms/frame 3668 draws/frame", and from the NVIDIA engine
+    // "... | VIctory-NVIDIA 5 fps (frame gen 10 fps) 197.9 ms/frame 3668 draws/frame" with frame generation on.
+    [GeneratedRegex(@"(?<fps>\d+(?:\.\d+)?) fps(?: \(frame gen (?<shown>\d+(?:\.\d+)?) fps\))?\s+(?<ms>\d+(?:\.\d+)?) ms/frame\s+(?<draws>\d+) draws/frame")]
     private static partial Regex Title();
 
     // "memory: 22820 MB private (14949 MB of it in memory; the PC has 406 MB free and 666 MB left to commit)"
@@ -62,7 +64,9 @@ public static partial class LogParser
     {
         if (string.IsNullOrEmpty(title)) return null;
         var m = Title().Match(title);
-        return m.Success ? new FrameStat(Num(m, "fps"), Num(m, "ms"), int.Parse(m.Groups["draws"].Value)) : null;
+        return m.Success
+            ? new FrameStat(Num(m, "fps"), Num(m, "ms"), int.Parse(m.Groups["draws"].Value), m.Groups["shown"].Success ? Num(m, "shown") : null)
+            : null;
     }
 
     public static MemoryStat? ParseMemory(string line)

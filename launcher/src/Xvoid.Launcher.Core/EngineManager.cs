@@ -5,9 +5,12 @@ using System.Text.Json;
 
 namespace Xvoid.Launcher.Core;
 
-public sealed record EngineRelease(string Tag, string Name, bool Prerelease, DateTimeOffset Published, string AssetUrl, long AssetSize, string? ChecksumUrl);
+public sealed record EngineRelease(EngineKind Kind, string Tag, string Name, bool Prerelease, DateTimeOffset Published, string AssetUrl, long AssetSize, string? ChecksumUrl);
 
-/// <summary>Finds, downloads, verifies and unpacks engine builds from the project's GitHub releases.</summary>
+/// <summary>
+/// Finds, downloads, verifies and unpacks engine builds from the project's GitHub releases. Each release carries one zip per
+/// engine (NVIDIA, AMD); each engine has its own folder of installed builds.
+/// </summary>
 public sealed class EngineManager
 {
     readonly AppPaths _paths;
@@ -21,33 +24,34 @@ public sealed class EngineManager
             _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("xvoid-launcher", "0.1"));
     }
 
-    public string FolderFor(string tag) => Path.Combine(_paths.Engines, Sanitize(tag));
+    public string FolderFor(EngineKind kind, string tag) => Path.Combine(_paths.EnginesFor(kind), Sanitize(tag));
 
-    public string? ExeFor(string? tag)
+    public string? ExeFor(EngineKind kind, string? tag)
     {
         if (string.IsNullOrEmpty(tag)) return null;
-        var exe = Path.Combine(FolderFor(tag), Branding.EngineExe);
+        var exe = Path.Combine(FolderFor(kind, tag), Branding.EngineExe);
         return File.Exists(exe) ? exe : null;
     }
 
-    /// <summary>The engine to run: a local build if one is chosen, else the installed release.</summary>
-    public string? Resolve(Settings s) =>
+    /// <summary>The engine to run: a local build if one is chosen, else the installed release of that engine.</summary>
+    public string? Resolve(Settings s, EngineKind kind) =>
         s.EngineSource == EngineSource.Local
             ? (File.Exists(s.LocalEnginePath) ? s.LocalEnginePath : null)
-            : ExeFor(s.InstalledEngineTag);
+            : ExeFor(kind, s.InstalledTag(kind));
 
-    /// <summary>The newest release that has the engine asset (pre-releases count: early builds are published as such).</summary>
-    public async Task<EngineRelease?> LatestAsync(CancellationToken ct = default)
+    /// <summary>The newest release that has this engine's asset (pre-releases count: early builds are published as such).</summary>
+    public async Task<EngineRelease?> LatestAsync(EngineKind kind, CancellationToken ct = default)
     {
         var url = $"https://api.github.com/repos/{Branding.RepoOwner}/{Branding.RepoName}/releases?per_page=10";
         using var response = await _http.GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        return ParseReleases(await JsonDocument.ParseAsync(stream, cancellationToken: ct));
+        return ParseReleases(await JsonDocument.ParseAsync(stream, cancellationToken: ct), kind);
     }
 
-    public static EngineRelease? ParseReleases(JsonDocument doc)
+    public static EngineRelease? ParseReleases(JsonDocument doc, EngineKind kind)
     {
+        var wanted = Branding.EngineAsset(kind);
         foreach (var r in doc.RootElement.EnumerateArray())
         {
             if (r.TryGetProperty("draft", out var draft) && draft.GetBoolean()) continue;
@@ -56,15 +60,15 @@ public sealed class EngineManager
             {
                 var name = a.GetProperty("name").GetString();
                 var link = a.GetProperty("browser_download_url").GetString();
-                if (name == Branding.EngineAsset) { asset = link; size = a.GetProperty("size").GetInt64(); }
-                else if (name == Branding.EngineAsset + Branding.ChecksumSuffix) sum = link;
+                if (name == wanted) { asset = link; size = a.GetProperty("size").GetInt64(); }
+                else if (name == wanted + Branding.ChecksumSuffix) sum = link;
             }
             if (asset is null) continue;
             var tag = r.GetProperty("tag_name").GetString() ?? "unknown";
             var title = r.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } t ? t : tag;
             var published = r.TryGetProperty("published_at", out var p) && p.ValueKind == JsonValueKind.String
                 ? p.GetDateTimeOffset() : DateTimeOffset.MinValue;
-            return new EngineRelease(tag, title, r.TryGetProperty("prerelease", out var pre) && pre.GetBoolean(), published, asset, size, sum);
+            return new EngineRelease(kind, tag, title, r.TryGetProperty("prerelease", out var pre) && pre.GetBoolean(), published, asset, size, sum);
         }
         return null;
     }
@@ -100,7 +104,7 @@ public sealed class EngineManager
             if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("The download does not match its checksum. Nothing was installed.");
 
-            var target = FolderFor(release.Tag);
+            var target = FolderFor(release.Kind, release.Tag);
             var staging = target + ".part";
             if (Directory.Exists(staging)) Directory.Delete(staging, true);
             Extract(zip, staging);
@@ -117,11 +121,12 @@ public sealed class EngineManager
         }
     }
 
-    /// <summary>Removes installed builds other than the one in use.</summary>
-    public void Prune(string keepTag)
+    /// <summary>Removes this engine's installed builds other than the one in use. The other engine's are left alone.</summary>
+    public void Prune(EngineKind kind, string keepTag)
     {
-        if (!Directory.Exists(_paths.Engines)) return;
-        foreach (var dir in Directory.GetDirectories(_paths.Engines))
+        var folder = _paths.EnginesFor(kind);
+        if (!Directory.Exists(folder)) return;
+        foreach (var dir in Directory.GetDirectories(folder))
             if (!string.Equals(Path.GetFileName(dir), Sanitize(keepTag), StringComparison.OrdinalIgnoreCase))
                 try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }

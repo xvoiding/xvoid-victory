@@ -7,7 +7,25 @@
             <TextBlock Style="{StaticResource Caption}" Margin="0,4,0,0" MaxWidth="640"
                        Text="The engine translates the game's shaders and builds GPU pipelines while you play, and every one it has to make mid-game is a stutter. Doing both ahead of time moves that wait here. Both steps can be stopped and carry on later." />
 
-            <Border Style="{StaticResource Card}" Margin="0,24,0,0">
+            <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Foreground="{StaticResource Faint}">
+                <Run Text="For the" /> <Run Text="{Binding KindName, Mode=OneWay}" FontWeight="SemiBold" /> <Run Text="engine. Each engine has its own shaders and pipelines." />
+            </TextBlock>
+
+            <!-- NVIDIA's DLSS and frame generation files: only the NVIDIA engine uses them. -->
+            <Border Style="{StaticResource Card}" Margin="0,24,0,0" Visibility="{Binding IsNvidia, Converter={StaticResource BoolToVis}}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Get NVIDIA DLSS files" Style="{StaticResource Heading}" />
+                        <TextBlock Text="{Binding DlssState}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
+                        <TextBlock Style="{StaticResource Caption}" Foreground="{StaticResource Faint}" Margin="0,2,0,0"
+                                   Text="About 70 MB from NVIDIA's GitHub. DLSS needs an RTX card; frame generation needs an RTX 40 series or newer." />
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="Download" Style="{StaticResource SecondaryButton}" Command="{Binding GetDlssCommand}" VerticalAlignment="Center" MinWidth="96" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <StackPanel>

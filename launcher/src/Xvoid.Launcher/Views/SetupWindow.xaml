@@ -82,13 +82,19 @@
                       <StackPanel DataContext="{Binding Engine}">
                         <TextBlock Text="Engine" Style="{StaticResource Title}" />
                         <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Dim}"
-                                   Text="The launcher downloads the engine from the project's GitHub releases and checks its SHA-256 before unpacking it. If you build the engine yourself, you can point the launcher at your own victory.exe instead." />
-                        <Border Style="{StaticResource Card}" Margin="0,20,0,0" Padding="16,14">
+                                   Text="The launcher downloads the engine from the project's GitHub releases and checks its SHA-256 before unpacking it. There are two engines, NVIDIA's and AMD's; you can install both later and switch between them. If you build the engine yourself, you can point the launcher at your own victory.exe instead." />
+                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                            <RadioButton Style="{StaticResource Segment}" GroupName="setupEngine" Content="Auto" IsChecked="{Binding ChoiceAuto, Mode=TwoWay}" />
+                            <RadioButton Style="{StaticResource Segment}" GroupName="setupEngine" Content="NVIDIA" IsChecked="{Binding ChoiceNvidia, Mode=TwoWay}" />
+                            <RadioButton Style="{StaticResource Segment}" GroupName="setupEngine" Content="AMD" IsChecked="{Binding ChoiceAmd, Mode=TwoWay}" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding ChoiceHint}" Style="{StaticResource Caption}" Margin="2,6,0,0" Foreground="{StaticResource Faint}" />
+                        <Border Style="{StaticResource Card}" Margin="0,16,0,0" Padding="16,14">
                             <StackPanel>
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                     <StackPanel>
-                                        <TextBlock Text="INSTALLED" Style="{StaticResource Overline}" />
+                                        <TextBlock Style="{StaticResource Overline}"><Run Text="{Binding KindName, Mode=OneWay}" /><Run Text=" INSTALLED" /></TextBlock>
                                         <TextBlock Text="{Binding Installed}" Style="{StaticResource Heading}" Margin="0,3,0,0" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1">

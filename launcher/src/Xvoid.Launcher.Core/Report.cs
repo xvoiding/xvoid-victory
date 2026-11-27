@@ -23,7 +23,8 @@ public static class Report
         sb.AppendLine().AppendLine("== Checks");
         foreach (var c in checks) sb.AppendLine($"[{c.Severity}] {c.Title}: {c.Detail}");
         sb.AppendLine().AppendLine("== Settings");
-        sb.AppendLine($"preset {settings.Preset}, console {settings.Console}, texture budget {settings.TextureBudgetMb} MB, list threads {settings.ListThreads}, ray tracing {settings.RayTracing}, ambient {settings.AmbientLight}");
+        sb.AppendLine($"preset {settings.Preset}, console {settings.Console}, texture budget {settings.TextureBudgetMb} MB, list threads {settings.ListThreads}, ray tracing {settings.RayTracing}, ambient {settings.AmbientLight?.ToString() ?? "engine default"}");
+        sb.AppendLine($"engine choice {settings.Engine} (resolves to {EngineKinds.Name(settings.Kind(sys))}), resolution {settings.Resolution}, DLSS {settings.Dlss}, frame generation {settings.FrameGeneration}, warm-up {settings.WarmUp}, NVIDIA files {(paths.HasStreamline ? "present" : "absent")}");
         sb.AppendLine($"host profile: wave {settings.Host.WaveMin}-{settings.Host.WaveMax}, view limit {settings.Host.ViewLimit}");
         sb.AppendLine($"game: {Redact(settings.GameExe)}");
         sb.AppendLine().AppendLine("== Last log lines");

@@ -11,10 +11,10 @@ runs. It replaces the PowerShell scripts in `scripts\` for people who do not wan
 | Page | |
 |---|---|
 | **Setup** (first run) | What this is, the game's folder, a check of the PC, the engine, a preset. |
-| **Play** | Starts the engine. While it runs: frames per second, ms per frame, draws per frame (read from the engine's title bar and log), the engine's memory, and how much Windows commit is left. When a run ends it says why, if it can tell. |
-| **Prepare** | Translates every shader ahead of time (`victory shaders`), then builds the pipelines earlier runs drew with (`victory warm --used`), with progress. Either can be stopped and carries on later. |
-| **Engine** | Checks the project's GitHub releases, downloads the engine build and verifies its SHA-256 before unpacking. Or point it at a build of your own. |
-| **Settings** | Preset (Auto, Safe, Low memory), console model, list-thread count, texture budget, ray tracing, the ambient stand-in, and the PC check with its repairs. The exact command and environment Play runs are shown, so nothing is hidden. |
+| **Play** | The **Auto / NVIDIA / AMD** engine toggle, and Play. While it runs: frames per second (and, with frame generation, the rate it shows), ms per frame, draws per frame (read from the engine's title bar and log), the engine's memory, and how much Windows commit is left. When a run ends it says why, if it can tell. A new NVIDIA engine build is played once for about 20 seconds and started again by itself (its first start stays slow whatever you do; the second is normal). |
+| **Prepare** | For the engine in use: downloads NVIDIA's DLSS and frame generation files (`victory get-dlss`, about 70 MB; NVIDIA engine only), translates every shader ahead of time (`victory shaders`), then builds the pipelines earlier runs drew with (`victory warm --used`), with progress. Either can be stopped and carries on later. |
+| **Engine** | The engine toggle again. Checks the project's GitHub releases for the engine you picked, downloads its build and verifies its SHA-256 before unpacking. Both engines can be installed. Or point it at a build of your own. |
+| **Settings** | The engine, preset (Auto, Safe, Low memory), console model, list-thread count, texture budget, ray tracing, the ambient stand-in, for the NVIDIA engine resolution, DLSS mode, frame generation and the warm-up, and the PC check with its repairs. The exact command and environment Play runs are shown, so nothing is hidden. |
 | **Logs** | The live log with a filter, the folder of past logs, and a report file (paths shortened) for bug reports. |
 
 ### The checks and their repairs
@@ -26,6 +26,20 @@ Both repairs are offered, never applied on their own.
   the most room, keeping 15 GB free. Windows asks for administrator rights for that one step, and a restart is needed.
 - **GPU choice.** On a laptop with an integrated and a dedicated GPU, Windows decides per program which one the engine
   gets. The fix sets "high performance" for the engine's executable (per user, no administrator rights).
+
+### The two engines
+
+| | NVIDIA | AMD |
+|---|---|---|
+| Release file | `victory-engine-nvidia-win-x64.zip` | `victory-engine-amd-win-x64.zip` |
+| Switches Play sets | the table in the engine's own `victory play` (`apps/victory/src/play.rs`), plus the launcher's choices | the 7900 XTX fork's set (`scripts/play.ps1`) |
+| Texture levels made on demand | never, except in the Low memory preset | on cards under 12 GB |
+| Ambient light stand-in | on (the engine's default), can be turned off | off, can be turned on |
+| DLSS, frame generation | yes: needs the files from Prepare; frame generation is RTX 40 series and newer, 2x. It adds shown frames, not render speed: a low frame rate before it stays choppy | no |
+| Cache | `cache\nvidia` | `cache\amd` |
+
+Engine builds live in `engines\nvidia\<tag>` and `engines\amd\<tag>`; the saves are shared. An older launcher's one cache
+is moved to `cache\nvidia`, the engine it was made for, and its engine builds are downloaded again.
 
 ### What it assumes about the GPU
 
@@ -50,10 +64,12 @@ the shader and pipeline cache, logs, reports).
 ## Releasing
 
 Pushing a tag (`v0.1.0`), or publishing a release for a new tag on the Releases page, runs `.github/workflows/release.yml`:
-it builds the engine (`diag` profile with diagnostics, the build every measurement here is of) and the launcher, runs the
-tests, and attaches these to the release (creating a pre-release if there is none yet):
+it builds both engines (release builds: this tree for NVIDIA, the commit `belobug-base` holds for AMD) and the launcher,
+runs the tests, and attaches these to the release (creating a pre-release if there is none yet; nothing is published unless all
+six are there):
 
-- `victory-engine-win-x64.zip` and `victory-engine-win-x64.zip.sha256` (the launcher refuses an engine with no checksum),
+- `victory-engine-nvidia-win-x64.zip` and `.sha256`, `victory-engine-amd-win-x64.zip` and `.sha256` (the launcher refuses an
+  engine with no checksum),
 - `xvoid-launcher.exe` and `xvoid-launcher.exe.sha256`.
 
 ## Layout

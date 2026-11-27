@@ -20,6 +20,64 @@
                 </StackPanel>
             </Border>
 
+            <!-- Engine -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                <StackPanel>
+                    <TextBlock Text="Engine" Style="{StaticResource Heading}" />
+                    <TextBlock Text="Which engine plays the game. Both can be installed; the same choice is on the Play and Engine pages." Style="{StaticResource Caption}" Margin="0,4,0,12" />
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Style="{StaticResource Segment}" GroupName="settingsEngine" Content="Auto" IsChecked="{Binding EngineAuto, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="settingsEngine" Content="NVIDIA" IsChecked="{Binding EngineNvidia, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="settingsEngine" Content="AMD" IsChecked="{Binding EngineAmd, Mode=TwoWay}" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding EngineHint}" Style="{StaticResource Caption}" Margin="0,8,0,0" Foreground="{StaticResource Faint}" />
+                </StackPanel>
+            </Border>
+
+            <!-- NVIDIA: picture and frame rate -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0" Visibility="{Binding IsNvidia, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                    <TextBlock Text="NVIDIA picture and frame rate" Style="{StaticResource Heading}" />
+                    <TextBlock Text="Only the NVIDIA engine has these. The F1 menu in the game can change DLSS and frame generation while you play." Style="{StaticResource Caption}" Margin="0,4,0,12" />
+
+                    <TextBlock Text="Resolution (Series X)" Style="{StaticResource Caption}" Margin="0,0,0,6" />
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Style="{StaticResource Segment}" GroupName="res" Content="Auto" IsChecked="{Binding ResolutionAuto, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="res" Content="1440p" IsChecked="{Binding Resolution1440, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="res" Content="1080p to 1440p" IsChecked="{Binding Resolution1080, Mode=TwoWay}" />
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" Foreground="{StaticResource Faint}"
+                               Text="Auto: 1440p with DLSS, otherwise drawn at 1080p and brought up to 1440p, which is lighter on the card." />
+
+                    <TextBlock Text="DLSS upscaling" Style="{StaticResource Caption}" Margin="0,18,0,6" />
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Style="{StaticResource Segment}" GroupName="dlss" Content="Off" IsChecked="{Binding DlssOff, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="dlss" Content="Quality" IsChecked="{Binding DlssQuality, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="dlss" Content="Balanced" IsChecked="{Binding DlssBalanced, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="dlss" Content="Performance" IsChecked="{Binding DlssPerformance, Mode=TwoWay}" />
+                    </StackPanel>
+
+                    <TextBlock Text="Frame generation" Style="{StaticResource Caption}" Margin="0,18,0,6" />
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Style="{StaticResource Segment}" GroupName="fg" Content="Ready" IsChecked="{Binding FrameGenReady, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="fg" Content="Off" IsChecked="{Binding FrameGenOff, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="fg" Content="2x" IsChecked="{Binding FrameGen2x, Mode=TwoWay}" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding DlssNote}" Style="{StaticResource Caption}" Margin="0,8,0,0" TextWrapping="Wrap" />
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,4,0,0" Foreground="{StaticResource Faint}" TextWrapping="Wrap"
+                               Text="Ready: loaded but not drawing extra frames until switched on in the F1 menu. Frame generation sets aside 1.5 to 2 GB of the card's memory." />
+
+                    <Grid Margin="0,18,0,0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="First-start warm-up" FontWeight="SemiBold" />
+                            <TextBlock Text="A new engine build stays slow for its whole first run and is normal from the second. The launcher plays it for about 20 seconds once, closes it, and starts it again." Style="{StaticResource Caption}" />
+                        </StackPanel>
+                        <CheckBox Grid.Column="1" Style="{StaticResource Switch}" IsChecked="{Binding WarmUp, Mode=TwoWay}" VerticalAlignment="Center" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- Preset -->
             <Border Style="{StaticResource Card}" Margin="0,12,0,0">
                 <StackPanel>
@@ -40,7 +98,7 @@
                         <StackPanel>
                             <TextBlock Text="Low memory (experimental)" FontWeight="SemiBold" />
                             <TextBlock Style="{StaticResource Caption}"
-                                       Text="The smaller console model and a texture budget, for 8 GB cards. It rendered a black picture on one RTX 4060 Laptop, so treat it as a test." />
+                                       Text="The smaller console model, a texture budget, and levels made when needed, for small cards. It rendered a black picture on one RTX 4060 Laptop, so treat it as a test." />
                         </StackPanel>
                     </RadioButton>
                 </StackPanel>
@@ -82,7 +140,7 @@
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <StackPanel>
                             <TextBlock Text="Ambient light stand-in" FontWeight="SemiBold" />
-                            <TextBlock Text="An estimate of indirect light for when ray tracing is off. Turned the picture white on one NVIDIA card." Style="{StaticResource Caption}" />
+                            <TextBlock Text="An estimate of indirect light for when ray tracing is off. On unless you change it for the NVIDIA engine, off for AMD. If the picture goes white, turn it off." Style="{StaticResource Caption}" />
                         </StackPanel>
                         <CheckBox Grid.Column="1" Style="{StaticResource Switch}" IsChecked="{Binding AmbientLight, Mode=TwoWay}" VerticalAlignment="Center" />
                     </Grid>

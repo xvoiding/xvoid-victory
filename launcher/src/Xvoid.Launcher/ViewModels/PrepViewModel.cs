@@ -21,13 +21,22 @@ public sealed class PrepViewModel : ObservableObject
         _logs = logs;
         ShadersCommand = new RelayCommand(() => Run(shaders: true), () => !Busy && Ready);
         PipelinesCommand = new RelayCommand(() => Run(shaders: false), () => !Busy && Ready && _app.PipelineListExists);
+        GetDlssCommand = new RelayCommand(RunGetDlss, () => !Busy && _app.EnginePath is not null && IsNvidia);
         CancelCommand = new RelayCommand(() => { _cancelRequested = true; _job?.Stop(); }, () => Busy);
         _app.EngineChanged += Refresh;
     }
 
     public RelayCommand ShadersCommand { get; }
     public RelayCommand PipelinesCommand { get; }
+    public RelayCommand GetDlssCommand { get; }
     public RelayCommand CancelCommand { get; }
+
+    /// <summary>DLSS and frame generation are the NVIDIA engine's; the AMD page has no such card.</summary>
+    public bool IsNvidia => _app.Kind == EngineKind.Nvidia;
+    public string KindName => _app.KindName;
+    public string DlssState => _app.Paths.HasStreamline
+        ? "NVIDIA's files are on this PC. DLSS and frame generation can be switched on in Settings."
+        : "Not downloaded yet. Without them the game upscales itself and frame generation is not available.";
 
     bool Ready => _app.EnginePath is not null && _app.Settings.GameExe is not null;
 
@@ -49,6 +58,7 @@ public sealed class PrepViewModel : ObservableObject
     public void Refresh()
     {
         Raise(nameof(ShadersState)); Raise(nameof(PipelinesState)); Raise(nameof(HostNote));
+        Raise(nameof(IsNvidia)); Raise(nameof(KindName)); Raise(nameof(DlssState));
         NotifyAll();
     }
 
@@ -56,16 +66,18 @@ public sealed class PrepViewModel : ObservableObject
     {
         ShadersCommand.NotifyCanExecuteChanged();
         PipelinesCommand.NotifyCanExecuteChanged();
+        GetDlssCommand.NotifyCanExecuteChanged();
         CancelCommand.NotifyCanExecuteChanged();
     }
 
     void Run(bool shaders)
     {
         var enginePath = _app.EnginePath!;
+        var kind = _app.Kind;
         string? caveat = null;
         var plan = shaders
-            ? Plans.Shaders(_app.Settings, _app.System, _app.Paths, enginePath, out caveat)
-            : Plans.Pipelines(_app.Settings, _app.Paths, enginePath);
+            ? Plans.Shaders(_app.Settings, _app.System, _app.Paths, enginePath, kind, out caveat)
+            : Plans.Pipelines(_app.Settings, _app.System, _app.Paths, enginePath, kind);
         var tag = _app.EngineLabel;
         var log = Path.Combine(_app.Paths.Logs, $"{(shaders ? "shaders" : "pipelines")}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
         var p = new EngineProcess(log);
@@ -85,7 +97,7 @@ public sealed class PrepViewModel : ObservableObject
             Progress = code == 0 ? 1 : Progress;
             if (code == 0)
             {
-                if (shaders) _app.Settings.ShadersPreparedFor = tag; else _app.Settings.PipelinesPreparedFor = tag;
+                (shaders ? _app.Settings.ShadersPrepared : _app.Settings.PipelinesPrepared)[EngineKinds.Folder(kind)] = tag;
                 _app.Save();
                 Message = shaders ? "Shaders translated." : "Pipelines made.";
             }
@@ -98,6 +110,42 @@ public sealed class PrepViewModel : ObservableObject
         Message = caveat ?? (shaders ? "Translating every shader. This takes a few minutes; leave the PC alone." : "Making pipelines on this GPU. This can take 10 to 60 minutes and can be stopped.");
         Progress = 0;
         Indeterminate = shaders;
+        try { p.Start(plan); }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            p.Dispose(); _job = null;
+            throw new InvalidOperationException($"The engine could not be started: {e.Message}");
+        }
+        Busy = true;
+    }
+
+    /// <summary>The engine's own `get-dlss`: NVIDIA's DLSS and frame generation files, from NVIDIA's GitHub, into the launcher's folder.</summary>
+    void RunGetDlss()
+    {
+        var plan = Plans.GetDlss(_app.Paths, _app.EnginePath!);
+        var log = Path.Combine(_app.Paths.Logs, $"dlss-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+        var p = new EngineProcess(log);
+        _logs.Attach(p);
+        _job = p;
+        p.Line += l => Ui.Post(() => LastLine = l.Length > 160 ? l[..160] : l);
+        _cancelRequested = false;
+        p.Exited += code => Ui.Post(() =>
+        {
+            Busy = false;
+            Indeterminate = false;
+            Progress = code == 0 ? 1 : 0;
+            Message = code == 0 && _app.Paths.HasStreamline
+                ? "NVIDIA's files are in place."
+                : _cancelRequested ? "Stopped." : $"The download did not finish (code {code}). See Logs.";
+            Refresh();
+            // Play's command line changes once the files are there.
+            _app.NotifyEngineChanged();
+            p.Dispose();
+            _job = null;
+        });
+        Message = "Downloading NVIDIA's DLSS and frame generation files (about 70 MB) from NVIDIA's GitHub.";
+        Progress = 0;
+        Indeterminate = true;
         try { p.Start(plan); }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
         {

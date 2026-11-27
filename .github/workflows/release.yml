@@ -1,7 +1,14 @@
 name: release
 
-# Tag a version (v0.1.0), or publish a release for a new tag on the Releases page, to build and attach the engine and the launcher. The launcher downloads the engine
-# asset and refuses it unless its .sha256 file is published beside it, so both files must stay in the release.
+# Tag a version (v0.1.5), or publish a release for a new tag on the Releases page, to build and attach both engines and the launcher.
+# The launcher downloads the engine zip for the engine you pick and refuses it unless its .sha256 file is published beside it, so every
+# zip and its .sha256 must stay in the release.
+#
+# Two engines, two programs:
+#   nvidia  this repository's own tree (trustno1-coder/VIctory-NVIDIA, tuned for GeForce cards, with DLSS and frame generation)
+#   amd     the tree the Radeon cards were tuned on (Belobug/VIctory-Belobug-AMD), pinned to the commit the `belobug-base` branch
+#           holds. n0c4p7s/belobug-victory re-uploads the same engine code; this repository's history has the original.
+# Both are release builds (`cargo build --release`), as the engines' own authors build them. The old `diag` profile was slower.
 on:
   push:
     tags: ['v*']
@@ -12,29 +19,44 @@ permissions:
 
 jobs:
   engine:
+    name: engine (${{ matrix.kind }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: nvidia
+            ref: ''
+          - kind: amd
+            # belobug-base
+            ref: f0a23281d34f53d81a665a95503a07a129d627a4
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref || github.sha }}
       # rustup on the runner reads rust-toolchain.toml and installs the pinned toolchain on the first cargo call.
       - uses: Swatinem/rust-cache@v2
-      # The build every measurement in docs/ is of: the diag profile with the diagnostics counters.
+        with:
+          key: ${{ matrix.kind }}
       - name: Build the engine
-        run: cargo build --locked --profile diag -p victory --features diagnostics
+        run: cargo build --locked --release -p victory
       - name: Package
         shell: pwsh
+        env:
+          ZIP: victory-engine-${{ matrix.kind }}-win-x64.zip
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/diag/victory.exe dist/victory.exe
+          Copy-Item target/release/victory.exe dist/victory.exe
           Copy-Item LICENSE dist/LICENSE
-          Compress-Archive -Path dist/victory.exe, dist/LICENSE -DestinationPath victory-engine-win-x64.zip -Force
-          $h = (Get-FileHash victory-engine-win-x64.zip -Algorithm SHA256).Hash.ToLower()
-          "$h  victory-engine-win-x64.zip" | Set-Content victory-engine-win-x64.zip.sha256 -Encoding ascii
+          Compress-Archive -Path dist/victory.exe, dist/LICENSE -DestinationPath $env:ZIP -Force
+          $h = (Get-FileHash $env:ZIP -Algorithm SHA256).Hash.ToLower()
+          "$h  $env:ZIP" | Set-Content "$env:ZIP.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: engine
+          name: engine-${{ matrix.kind }}
           path: |
-            victory-engine-win-x64.zip
-            victory-engine-win-x64.zip.sha256
+            victory-engine-${{ matrix.kind }}-win-x64.zip
+            victory-engine-${{ matrix.kind }}-win-x64.zip.sha256
 
   launcher:
     runs-on: windows-latest
@@ -70,6 +92,12 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
+          # Every file the launcher needs is there before anything is published.
+          for f in victory-engine-nvidia-win-x64.zip victory-engine-nvidia-win-x64.zip.sha256 \
+                   victory-engine-amd-win-x64.zip victory-engine-amd-win-x64.zip.sha256 \
+                   xvoid-launcher.exe xvoid-launcher.exe.sha256; do
+            test -s "assets/$f" || { echo "missing $f"; exit 1; }
+          done
           # If the release was made first (on the Releases page, say), the files are added to it.
           # Otherwise the release is created here.
           if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
@@ -79,5 +107,5 @@ jobs:
               --repo "$REPO" \
               --title "$TAG" \
               --prerelease \
-              --notes "Engine build and launcher. Needs your own copy of the game's files; none are included. Experimental."
+              --notes "Both engines (NVIDIA and AMD, release builds) and the launcher. Needs your own copy of the game's files; none are included. Experimental."
           fi

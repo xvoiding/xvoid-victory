@@ -29,8 +29,23 @@ public class LogParserTests
     {
         var f = LogParser.ParseTitle("Americas | VIctory 5 fps 197.9 ms/frame 3668 draws/frame");
         Assert.Equal(new FrameStat(5, 197.9, 3668), f);
+        Assert.Null(f!.Shown);
         Assert.Null(LogParser.ParseTitle("Americas"));
         Assert.Null(LogParser.ParseTitle(null));
+    }
+
+    [Fact]
+    public void Nvidia_title_bar_with_frame_generation_gives_rendered_and_shown_rates()
+    {
+        var f = LogParser.ParseTitle("Americas | VIctory-NVIDIA 24 fps (frame gen 47 fps) 41.7 ms/frame 3120 draws/frame");
+        Assert.Equal(new FrameStat(24, 41.7, 3120, 47), f);
+    }
+
+    [Fact]
+    public void Nvidia_title_bar_without_frame_generation_reads_like_the_old_one()
+    {
+        var f = LogParser.ParseTitle("Americas | VIctory-NVIDIA 28 fps 35.7 ms/frame 3120 draws/frame");
+        Assert.Equal(new FrameStat(28, 35.7, 3120), f);
     }
 
     [Fact]
