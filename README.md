@@ -1,7 +1,7 @@
 # xvoid-victory
 
 A fork of [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)
-(branch `a-publier`, `cd8dfc0`, 2026-11-26), which follows
+(branch `a-publier`, `4eb6cfd`, 2026-11-26), which follows
 [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) and
 carries its own AMD fixes and an FSR 4 port from DexNom/VIctory; all of it a fork
 of [VIctory](https://github.com/Marvisak/VIctory): a compatibility
@@ -9,8 +9,9 @@ layer that runs an Xbox Series title natively on Windows from files the user
 supplies. It is made by xvoid with [Claude Code](https://claude.com/claude-code).
 Licence GPL-3.0-or-later, credits as in `LICENSE`.
 
-The branch `belobug-base` takes that engine as it is and keeps this fork's
-launcher, scripts and policy checks on top. Belobug's README says it was tested
+This repository's runtime is that engine, taken as it is, with this fork's
+launcher, scripts and policy checks on top (`main` is the same tree as the branch
+`belobug-base`). Belobug's README says it was tested
 only on an AMD RX 9070 XT and is not playable yet; nothing here has been run on
 it. The sibling branch `cgbj-base` is the same launcher on
 [Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork), which was measured on

@@ -490,11 +490,9 @@ fn the_titles_upscaler_runs_on_the_host() {
     eprintln!("provider {:#x} {:?}", provider.id, unsafe {
         std::ffi::CStr::from_ptr(provider.name)
     });
-    assert!(
-        unsafe { std::ffi::CStr::from_ptr(provider.name) }
-            .to_bytes()
-            .starts_with(b"4.1.2")
-    );
+    // FSR 4.1.2 where the SDK offers it for this card, FSR 3.1 otherwise.
+    let name = unsafe { std::ffi::CStr::from_ptr(provider.name) }.to_bytes();
+    assert!(name.starts_with(b"4.1.2") || name.starts_with(b"3.1."));
     // Two frames: the first resets the history.
     for reset in [1, 0] {
         upscaling.reset = reset;

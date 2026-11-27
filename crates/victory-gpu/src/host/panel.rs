@@ -26,7 +26,7 @@ const GLYPH: (u32, u32) = (5, 7);
 
 /// Logical canvas dimensions (1x at <=1600p, 2x at 4K).
 const BASE_W: u32 = 540;
-const BASE_H: u32 = 334;
+const BASE_H: u32 = 354;
 
 /// How many recent frames the live frame-time graph keeps.
 const HISTORY: usize = 172;
@@ -318,21 +318,18 @@ fn cpu_name() -> &'static str {
     })
 }
 
-/// Adapter name and dedicated VRAM size from DXGI, queried once.
-fn gpu_info(host: &Host) -> &'static (String, u64) {
-    static INFO: OnceLock<(String, u64)> = OnceLock::new();
-    INFO.get_or_init(|| {
-        let Some(adapter) = host.adapter.as_ref() else {
-            return ("GPU".to_owned(), 0);
-        };
-        // SAFETY: plain DXGI descriptor query.
-        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
-            return ("GPU".to_owned(), 0);
-        };
-        let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
-        let name = String::from_utf16_lossy(&desc.Description[..end]).trim().to_owned();
-        (if name.is_empty() { "GPU".to_owned() } else { name }, desc.DedicatedVideoMemory as u64)
-    })
+/// Name and dedicated capacity of the adapter used for this sample.
+fn gpu_info(host: &Host) -> (String, Option<u64>) {
+    let Some(adapter) = host.adapter.as_ref() else {
+        return ("GPU".to_owned(), None);
+    };
+    // SAFETY: plain DXGI descriptor query.
+    let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+        return ("GPU".to_owned(), None);
+    };
+    let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+    let name = String::from_utf16_lossy(&desc.Description[..end]).trim().to_owned();
+    (if name.is_empty() { "GPU".to_owned() } else { name }, Some(desc.DedicatedVideoMemory as u64))
 }
 
 /// System RAM: `(used_phys, total_phys, used_commit, total_commit)` in bytes.
@@ -383,7 +380,7 @@ impl CpuMeter {
                 return None;
             }
             let p = GetProcAddress(ntdll, c"NtQuerySystemInformation".as_ptr().cast())?;
-            Some(std::mem::transmute::<_, NtQuery>(p))
+            Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, NtQuery>(p))
         });
         let Some(query) = query else { return };
         let n = std::thread::available_parallelism().map_or(8, |n| n.get()).min(64);
@@ -405,9 +402,7 @@ impl CpuMeter {
             self.cores_pct.clear();
             let mut sum = 0.0f32;
             for (&(pi, pt), &(ni, nt)) in self.prev.iter().zip(&now) {
-                let dt = (nt - pt).max(1) as f32;
-                let di = (ni - pi).clamp(0, nt - pt) as f32;
-                let busy = ((1.0 - di / dt) * 100.0).clamp(0.0, 100.0);
+                let busy = busy_pct((pi, pt), (ni, nt));
                 self.cores_pct.push(busy);
                 sum += busy;
             }
@@ -472,14 +467,15 @@ struct Snapshot {
     width: u32,
     height: u32,
     gpu_name: String,
-    vram_used_gb: f64,
-    vram_budget_gb: f64,
-    vram_shared_gb: f64,
+    // Byte counts. A failed query is distinct from a measured zero.
+    vram_local: Option<(u64, u64)>, // process usage, OS budget
+    vram_dedicated: Option<u64>,    // adapter capacity
+    vram_shared: Option<u64>,       // process non-local usage
     vram_rt_gb: f64,
     vram_tex_gb: f64,
     vram_buf_gb: f64,
     vram_bvh_gb: f64,
-    vram_oth_gb: f64,
+    vram_other: Option<u64>,
     cpu_name: String,
     cpu_pct: f32,
     cores_pct: Vec<f32>,
@@ -488,6 +484,29 @@ struct Snapshot {
     sys_ram_total_gb: f64,
     sys_commit_gb: f64,
     history_ms: Vec<f32>,
+}
+
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
+}
+
+fn display_gib(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "N/A".to_owned(), |n| format!("{:.1}", gib(n)))
+}
+
+fn video_memory_lines(
+    local: Option<(u64, u64)>,
+    dedicated: Option<u64>,
+    shared: Option<u64>,
+) -> [String; 2] {
+    [
+        format!(
+            "LOCAL {} | BUDGET {} GiB",
+            display_gib(local.map(|s| s.0)),
+            display_gib(local.map(|s| s.1)),
+        ),
+        format!("DED CAP {} | SHARED {} GiB", display_gib(dedicated), display_gib(shared)),
+    ]
 }
 
 fn fps_color(fps: f64) -> [u8; 3] {
@@ -587,35 +606,31 @@ fn paint_hud(s: &Snapshot) -> Canvas {
 
     // VRAM
     c.text(14, 196, 2, LABEL, "VRAM");
-    let vram_col = if s.vram_budget_gb > 0.0 && s.vram_used_gb / s.vram_budget_gb >= 0.92 {
-        ORANGE
-    } else {
-        WHITE
-    };
-    let vram_line = format!(
-        "{:.1}/{:.1} GB | SHR {:.1} GB",
-        s.vram_used_gb, s.vram_budget_gb, s.vram_shared_gb
-    );
-    c.text_sep(val_x, 196, 2, vram_col, &trunc(&vram_line, max_chars));
+    let near_budget = s.vram_local.is_some_and(|(used, budget)| {
+        budget != 0 && used as f64 / budget as f64 >= 0.92
+    });
+    let [local, capacity] = video_memory_lines(s.vram_local, s.vram_dedicated, s.vram_shared);
+    c.text_sep(val_x, 196, 2, if near_budget { ORANGE } else { WHITE }, &local);
+    c.text_sep(val_x, 216, 2, WHITE, &capacity);
 
     // VRAM breakdown (Render Targets | Textures/Pool | Card Buffers | BVH Arenas | Other/Driver)
     let vram_detail = format!(
-        "RT {:.1} | TX {:.1} | BF {:.1} | BV {:.1} | O {:.1}",
-        s.vram_rt_gb, s.vram_tex_gb, s.vram_buf_gb, s.vram_bvh_gb, s.vram_oth_gb
+        "RT {:.1} | TX {:.1} | BF {:.1} | BV {:.1} | O {}",
+        s.vram_rt_gb, s.vram_tex_gb, s.vram_buf_gb, s.vram_bvh_gb, display_gib(s.vram_other)
     );
-    c.text_sep(14, 216, 2, MUTED, &trunc(&vram_detail, 43));
+    c.text_sep(14, 236, 2, MUTED, &trunc(&vram_detail, 43));
 
     // CPU + per-core bars
-    c.text(14, 236, 2, LABEL, "CPU");
+    c.text(14, 256, 2, LABEL, "CPU");
     let cpu_line = format!("{} {:.0}%", trunc(&s.cpu_name, max_chars.saturating_sub(5)), s.cpu_pct);
-    c.text(val_x, 236, 2, WHITE, &trunc(&cpu_line, max_chars));
+    c.text(val_x, 256, 2, WHITE, &trunc(&cpu_line, max_chars));
 
     let cores = s.cores_pct.len().clamp(1, 32);
     let area_w = BASE_W - val_x - 14;
     let gap = 2u32;
     let cw = ((area_w + gap) / cores as u32).saturating_sub(gap).max(4);
     let bar_h = 22u32;
-    let bar_y = 256u32;
+    let bar_y = 276u32;
     for (i, &pct) in s.cores_pct.iter().take(cores).enumerate() {
         let bx = val_x + i as u32 * (cw + gap);
         c.rect(bx, bar_y, cw, bar_h, BAR_BG);
@@ -628,17 +643,17 @@ fn paint_hud(s: &Snapshot) -> Canvas {
     }
 
     // VICTORY
-    c.text(14, 288, 2, LABEL, "VICTORY");
-    let vic_line = format!("RAM {:.1} GB | DROP {}", s.proc_ram_gb, s.dropped);
-    c.text_sep(val_x, 288, 2, WHITE, &trunc(&vic_line, max_chars));
+    c.text(14, 308, 2, LABEL, "VICTORY");
+    let vic_line = format!("COMMIT {:.1} GiB | DROP {}", s.proc_ram_gb, s.dropped);
+    c.text_sep(val_x, 308, 2, WHITE, &trunc(&vic_line, max_chars));
 
     // RAM
-    c.text(14, 308, 2, LABEL, "RAM");
+    c.text(14, 328, 2, LABEL, "RAM");
     let ram_line = format!(
-        "{:.1}/{:.1} GB | CMT {:.1}",
+        "{:.1}/{:.1} GiB | CMT {:.1}",
         s.sys_ram_used_gb, s.sys_ram_total_gb, s.sys_commit_gb
     );
-    c.text_sep(val_x, 308, 2, WHITE, &trunc(&ram_line, max_chars));
+    c.text_sep(val_x, 328, 2, WHITE, &trunc(&ram_line, max_chars));
 
     c
 }
@@ -791,9 +806,8 @@ impl Panel {
             fps
         };
 
-        let gb = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
         let private = process_private_bytes();
-        let [budget, used, _, shared] = host.video_memory().unwrap_or_default();
+        let [local, shared] = host.sample_video_memory();
         let all_tex = crate::resource::HOST_TEXTURES[1].load(Ordering::Relaxed);
         let filled_tex = crate::resource::KINDS[1].load(Ordering::Relaxed);
         let rt_bytes = all_tex.saturating_sub(filled_tex);
@@ -801,9 +815,9 @@ impl Panel {
         let tex_bytes = filled_tex.max(pool_bytes) + crate::tiles::given_total();
         let [buf_bytes, bvh_bytes] = crate::shadow::vram_breakdown();
         let known = rt_bytes + tex_bytes + buf_bytes + bvh_bytes;
-        let oth_bytes = used.saturating_sub(known);
+        let other = local.map(|s| s.CurrentUsage.saturating_sub(known));
         let (sys_used, sys_total, sys_commit, _) = system_memory();
-        let (gpu_name, _) = gpu_info(host);
+        let (gpu_name, dedicated) = gpu_info(host);
 
         self.snap = Some(Snapshot {
             fps,
@@ -817,22 +831,22 @@ impl Panel {
             dropped: c[8].round() as u64,
             width: self.last_size.0,
             height: self.last_size.1,
-            gpu_name: gpu_name.clone(),
-            vram_used_gb: gb(used),
-            vram_budget_gb: gb(budget),
-            vram_shared_gb: gb(shared),
-            vram_rt_gb: gb(rt_bytes),
-            vram_tex_gb: gb(tex_bytes),
-            vram_buf_gb: gb(buf_bytes),
-            vram_bvh_gb: gb(bvh_bytes),
-            vram_oth_gb: gb(oth_bytes),
+            gpu_name,
+            vram_local: local.map(|s| (s.CurrentUsage, s.Budget)),
+            vram_dedicated: dedicated,
+            vram_shared: shared.map(|s| s.CurrentUsage),
+            vram_rt_gb: gib(rt_bytes),
+            vram_tex_gb: gib(tex_bytes),
+            vram_buf_gb: gib(buf_bytes),
+            vram_bvh_gb: gib(bvh_bytes),
+            vram_other: other,
             cpu_name: cpu_name().to_owned(),
             cpu_pct: self.cpu.total_pct,
             cores_pct: self.cpu.cores_pct.clone(),
-            proc_ram_gb: gb(private),
-            sys_ram_used_gb: gb(sys_used),
-            sys_ram_total_gb: gb(sys_total),
-            sys_commit_gb: gb(sys_commit),
+            proc_ram_gb: gib(private),
+            sys_ram_used_gb: gib(sys_used),
+            sys_ram_total_gb: gib(sys_total),
+            sys_commit_gb: gib(sys_commit),
             history_ms: self.history.iter().copied().collect(),
         });
         self.changed = true;
@@ -928,6 +942,19 @@ impl Panel {
     }
 }
 
+/// How busy a core was between two reads of its (idle, kernel + user)
+/// counters, in percent. A core's counters can step back between two
+/// reads (seen on a Ryzen 7 7700): that reads as idle rather than making
+/// `clamp(0, negative)` panic on the submitting thread.
+fn busy_pct((pi, pt): (i64, i64), (ni, nt): (i64, i64)) -> f32 {
+    let span = nt - pt;
+    if span <= 0 {
+        return 0.0;
+    }
+    let di = (ni - pi).clamp(0, span) as f32;
+    ((1.0 - di / span as f32) * 100.0).clamp(0.0, 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +973,29 @@ mod tests {
     }
 
     #[test]
+    fn video_memory_keeps_budget_capacity_and_usage_distinct() {
+        let lines = video_memory_lines(Some((17 << 30, 16 << 30)), Some(24 << 30), Some(1 << 29));
+        assert_eq!(lines, ["LOCAL 17.0 | BUDGET 16.0 GiB", "DED CAP 24.0 | SHARED 0.5 GiB"]);
+        let width = (BASE_W - 104 - 10) / 12;
+        let large = video_memory_lines(Some((512 << 30, 256 << 30)), Some(768 << 30), Some(128 << 30));
+        for line in large {
+            assert!(line.len() <= width as usize, "{line}");
+        }
+    }
+
+    #[test]
+    fn missing_video_memory_samples_stay_unknown() {
+        assert_eq!(
+            video_memory_lines(None, Some(0), Some(0)),
+            ["LOCAL N/A | BUDGET N/A GiB", "DED CAP 0.0 | SHARED 0.0 GiB"],
+        );
+        assert_eq!(
+            video_memory_lines(Some((0, 1 << 30)), None, None),
+            ["LOCAL 0.0 | BUDGET 1.0 GiB", "DED CAP N/A | SHARED N/A GiB"],
+        );
+    }
+
+    #[test]
     fn a_box_is_painted() {
         let snap = Snapshot {
             fps: 32.0,
@@ -960,14 +1010,14 @@ mod tests {
             width: 2560,
             height: 1440,
             gpu_name: "AMD RADEON RX 9070 XT".into(),
-            vram_used_gb: 11.4,
-            vram_budget_gb: 13.2,
-            vram_shared_gb: 4.2,
+            vram_local: Some((11 << 30, 13 << 30)),
+            vram_dedicated: Some(16 << 30),
+            vram_shared: Some(4 << 30),
             vram_rt_gb: 2.8,
             vram_tex_gb: 3.5,
             vram_buf_gb: 1.2,
             vram_bvh_gb: 0.8,
-            vram_oth_gb: 3.1,
+            vram_other: Some(3 << 30),
             cpu_name: "AMD RYZEN 7 9800X3D".into(),
             cpu_pct: 34.0,
             cores_pct: vec![60.0, 40.0, 90.0, 20.0],
@@ -996,5 +1046,23 @@ mod tests {
         (a.0[1], b.0[1]) = (50, 20);
         let c = b.since(a, 10.0);
         assert_eq!((c[0], c[1]), (2.0, 2.0));
+    }
+}
+
+#[cfg(test)]
+mod busy_tests {
+    use super::busy_pct;
+
+    #[test]
+    fn busy_is_the_share_of_time_not_idle() {
+        assert_eq!(busy_pct((0, 0), (25, 100)), 75.0);
+        assert_eq!(busy_pct((0, 0), (100, 100)), 0.0);
+    }
+
+    #[test]
+    fn counters_that_step_back_do_not_panic() {
+        assert_eq!(busy_pct((10, 156_250), (10, 0)), 0.0);
+        assert_eq!(busy_pct((500, 1_000), (400, 900)), 0.0);
+        assert_eq!(busy_pct((500, 1_000), (400, 1_100)), 100.0);
     }
 }

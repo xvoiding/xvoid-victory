@@ -41,9 +41,6 @@ pub(crate) struct Staging {
     base: u64,
     /// Back in the pool with the last list that names it.
     _piece: Option<crate::pool::StagingPiece>,
-    /// Its bytes.
-    #[cfg(feature = "diagnostics")]
-    size: u64,
     data: *mut u8,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
@@ -1917,8 +1914,6 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         buffer,
         base,
         _piece: piece,
-        #[cfg(feature = "diagnostics")]
-        size: total,
         data,
         footprints,
         rows,

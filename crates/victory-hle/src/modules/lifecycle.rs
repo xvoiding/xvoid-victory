@@ -261,6 +261,36 @@ extern "system" fn window_proc(
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
         return 0;
     }
+    // Auto-hide the Windows cursor inside the game window's client area while
+    // GTA mouse-look lock (`~` / `F2`) is active, and restore it immediately
+    // when unlocked (`~` / `F2` / `Esc` / `P`).
+    if message == wm::WM_SETCURSOR && (lparam as u32 & 0xFFFF) == wm::HTCLIENT {
+        static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+        if super::gameinput::cursor_locked() {
+            CURSOR_HIDDEN.store(true, Ordering::Relaxed);
+            // SAFETY: hides the cursor only inside our client area on the UI thread.
+            unsafe { wm::SetCursor(std::ptr::null_mut()) };
+            return 1;
+        }
+        if CURSOR_HIDDEN.swap(false, Ordering::Relaxed) {
+            // SAFETY: let the title's procedure restore its cursor first; if it
+            // leaves none set, fall back to the standard arrow.
+            let res = unsafe {
+                let title = wm::GetPropW(hwnd, TITLE_PROC);
+                let title = std::mem::transmute::<*mut c_void, wm::WNDPROC>(title);
+                wm::CallWindowProcW(title, hwnd, message, wparam, lparam)
+            };
+            // SAFETY: runs on this window's UI thread; restores the standard
+            // arrow cursor if the title's window procedure left none set.
+            unsafe {
+                if wm::GetCursor().is_null() {
+                    let arrow = wm::LoadCursorW(std::ptr::null_mut(), wm::IDC_ARROW);
+                    wm::SetCursor(arrow);
+                }
+            }
+            return res;
+        }
+    }
     // SAFETY: the procedure `hook` stored, called the way the system would.
     unsafe {
         let title = wm::GetPropW(hwnd, TITLE_PROC);

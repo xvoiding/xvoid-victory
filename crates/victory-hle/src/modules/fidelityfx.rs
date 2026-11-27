@@ -157,6 +157,8 @@ struct Host {
     dispatch: Call,
     device: ID3D12Device,
     provider_id: u64,
+    /// The provider's version as the SDK names it (`4.1.2`, `3.1.5`).
+    provider_name: String,
 }
 
 struct Library(windows_sys::Win32::Foundation::HMODULE);
@@ -235,6 +237,12 @@ pub fn use_host_dir(dir: &Path) -> Result<(), String> {
     let (host, version) = load(dir)?;
     HOST.set(host)
         .map_err(|_| String::from("FidelityFX provider already initialized"))?;
+    if !is_fsr_4_1_2(&version) {
+        tracing::warn!(
+            version,
+            "FidelityFX: the SDK offers this adapter no FSR 4.1.2; FSR 3.1 is used in its place (its picture differs from 4's)"
+        );
+    }
     tracing::info!(folder = %dir.display(), version, "FidelityFX: selected PC upscaler");
     Ok(())
 }
@@ -288,6 +296,7 @@ fn load(dir: &Path) -> Result<(Host, String), String> {
             _library: library,
             device,
             provider_id,
+            provider_name: version.clone(),
         }
     };
     Ok((host, version))
@@ -330,23 +339,49 @@ fn select_version(query_fn: Call, device: &ID3D12Device) -> Result<(u64, String)
             "upscaler version names could not be queried (code {code})"
         ));
     }
-    let mut available = Vec::new();
+    let mut offered = Vec::new();
     for (id, name) in ids.into_iter().zip(names).take(count as usize) {
         if !name.is_null() {
             // SAFETY: NUL-terminated name owned by the SDK.
             let name = unsafe { CStr::from_ptr(name) }
                 .to_string_lossy()
                 .into_owned();
-            if is_fsr_4_1_2(&name) {
-                return Ok((id, name));
-            }
-            available.push(name);
+            offered.push((id, name));
         }
     }
-    Err(format!(
-        "no FSR 4.1.2 provider for this adapter (available: {})",
-        available.join(", ")
-    ))
+    choose(offered)
+}
+
+/// The patch number of an FSR 3.1 provider's name (`3.1.5` → 5); `None` for
+/// any other version (`3.10.0`, `2.3.4`, `4.1.2`).
+fn fsr_3_1_patch(name: &str) -> Option<u32> {
+    let patch = name.strip_prefix("3.1.")?;
+    let digits = patch.len() - patch.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    patch[..digits].parse().ok()
+}
+
+/// The provider to ask for, of those the SDK offers for the adapter: FSR
+/// 4.1.2 where there is one, otherwise the newest FSR 3.1 (which runs on any
+/// D3D12 card; AMD offers 4 on few). With neither, what was offered is said.
+fn choose(offered: Vec<(u64, String)>) -> Result<(u64, String), String> {
+    if let Some(at) = offered.iter().position(|(_, name)| is_fsr_4_1_2(name)) {
+        return Ok(offered.into_iter().nth(at).unwrap());
+    }
+    let newest = offered
+        .iter()
+        .enumerate()
+        .filter_map(|(at, (_, name))| fsr_3_1_patch(name).map(|patch| (patch, at)))
+        .max_by_key(|&(patch, _)| patch);
+    match newest {
+        Some((_, at)) => Ok(offered.into_iter().nth(at).unwrap()),
+        None => {
+            let names: Vec<&str> = offered.iter().map(|(_, name)| name.as_str()).collect();
+            Err(format!(
+                "the SDK offers this adapter neither FSR 4.1.2 nor FSR 3.1 (offered: {}); run without -Fsr4K (VICTORY_FSR_4K)",
+                if names.is_empty() { "nothing".into() } else { names.join(", ") }
+            ))
+        }
+    }
 }
 
 /// Puts the host backend after the title's upscaler description, in place
@@ -442,12 +477,13 @@ extern "C" fn ffxCreateContext(
         .then(|| unsafe { CStr::from_ptr(version.name) }.to_string_lossy());
     if query_code != OK
         || version.id != host.provider_id
-        || !name.as_deref().is_some_and(is_fsr_4_1_2)
+        || name.as_deref() != Some(host.provider_name.as_str())
     {
         tracing::warn!(
             query_code,
             provider = name.as_deref().unwrap_or("?"),
-            "FidelityFX created a different provider than the requested 4.1.2"
+            requested = host.provider_name,
+            "FidelityFX created a different provider than the one requested"
         );
         // SAFETY: the PC provider just created the context with this allocator.
         unsafe { (host.destroy)(context, memory) };
@@ -825,6 +861,30 @@ mod tests {
             resolver.classify("amd_fidelityfx_loader_xbox.dll", &symbol),
             None
         );
+    }
+
+    fn offered(names: &[&str]) -> Vec<(u64, String)> {
+        names.iter().zip(1..).map(|(name, id)| (id, name.to_string())).collect()
+    }
+
+    /// FSR 4.1.2 where the SDK offers it; otherwise the newest 3.1, which
+    /// is what a card without FSR 4 is offered; with neither, said so.
+    #[test]
+    fn the_provider_is_4_1_2_or_else_the_newest_3_1() {
+        assert_eq!(choose(offered(&["3.1.5", "4.1.2", "2.3.4"])), Ok((2, "4.1.2".into())));
+        assert_eq!(choose(offered(&["4.1.2 (ML)", "3.1.5"])), Ok((1, "4.1.2 (ML)".into())));
+        assert_eq!(choose(offered(&["2.3.4", "3.1.4", "3.1.5"])), Ok((3, "3.1.5".into())));
+        assert_eq!(choose(offered(&["3.1.10", "3.1.9"])), Ok((1, "3.1.10".into())));
+        // Other versions are not taken for either.
+        assert_eq!(choose(offered(&["4.1.20", "3.1.5", "3.10.0"])), Ok((2, "3.1.5".into())));
+        let none = choose(offered(&["2.3.4", "4.0.3"])).unwrap_err();
+        assert!(none.contains("2.3.4, 4.0.3") && none.contains("-Fsr4K"), "{none}");
+        assert!(choose(Vec::new()).unwrap_err().contains("nothing"));
+        assert_eq!(fsr_3_1_patch("3.1.5"), Some(5));
+        assert_eq!(fsr_3_1_patch("3.1.5-beta"), Some(5));
+        assert_eq!(fsr_3_1_patch("3.1."), None);
+        assert_eq!(fsr_3_1_patch("3.10.0"), None);
+        assert_eq!(fsr_3_1_patch("4.1.2"), None);
     }
 
     #[test]
